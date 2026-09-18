@@ -367,3 +367,171 @@ Das Kernprinzip trennt Daten- und Prompt-Modell von der Rechen-Engine:
    * Pläne und Workouts unterstützen `sport_type`, `metric_primary`, `metric_unit`, `intensity_target` und `intensity_detail`.
    * Detail-Parameter für Nicht-Lauf-Disziplinen werden über flexible JSON-Payloads (`structure_json` / `actual_metrics_json`) abgebildet, ohne das Tabellenschema brechen zu müssen.
    * Multi-Sport-Tage werden durch mehrere Workouts am selben Datum mit unterschiedlichem `sport_type` abgebildet.
+
+## 9. Sportarten- & Zielkatalog (Referenz)
+
+### 🏃 Laufsport (`RunningStrategy`)
+
+| Ziel (`goal_type`) | Planstruktur | Primärmetrik | Zonenmodell |
+|---------------------|-------------|-------------|-------------|
+| `5k` | 8–12 Wochen | km | Daniels VDOT |
+| `10k` | 10–14 Wochen | km | Daniels VDOT |
+| `half_marathon` | 12–16 Wochen | km | Daniels VDOT |
+| `marathon` | 16–24 Wochen | km | Daniels VDOT |
+| `ultra_50k` / `ultra_100k` | 20–30 Wochen | km + Höhenmeter | VDOT + Zeitbasiert |
+| `base_building` | Fortlaufend (zyklisch) | km | VDOT |
+| `return_to_running` | 6–12 Wochen | km + Minuten | Konservativ, HR-basiert |
+| `couch_to_5k` | 8–10 Wochen | Minuten (Walk/Run) | Puls / RPE |
+
+Besonderheiten Ultra: Longrun-Cap in Zeit statt km (z. B. max. 4h statt max. 34 km), Vertikalmeter als sekundäre Metrik.
+
+### 🚴 Radsport (`CyclingStrategy`)
+
+| Ziel (`goal_type`) | Planstruktur | Primärmetrik | Zonenmodell |
+|---------------------|-------------|-------------|-------------|
+| `ftp_builder` | 8–12 Wochen | TSS / Minuten | Coggan FTP-Zonen (Z1–Z7) |
+| `gran_fondo` | 12–20 Wochen | TSS / km | Coggan FTP |
+| `crit_race` | 8–12 Wochen | TSS + Intervalle | FTP + anaerobe Kapazität |
+| `mtb_endurance` | 12–16 Wochen | Stunden + Höhenmeter | FTP / HR |
+| `base_endurance` | Fortlaufend | TSS / Woche | FTP |
+| `zwift_training` | 8–12 Wochen | TSS / Watt | FTP (Indoor) |
+
+Besonderheiten: Sweetspot-Blöcke (88–94 % FTP), Over-Under-Intervalle, Periodisierung nach CTL/ATL/TSB, Indoor/Outdoor-Differenzierung.
+
+### 🏋️ Kraftsport (`StrengthStrategy`)
+
+| Ziel (`goal_type`) | Planstruktur | Primärmetrik | Intensitätsmodell |
+|---------------------|-------------|-------------|-------------------|
+| `hypertrophy` | 8–16 Wochen | Tonnage (kg × Wdh) | RIR / RPE |
+| `strength_5x5` | 12–16 Wochen | 1RM-Prozentsätze | % 1RM |
+| `powerlifting_meet` | 12–20 Wochen (Peaking) | SBD (Squat/Bench/Dead) | Wilks / % 1RM |
+| `bodyweight_fitness` | Fortlaufend | Wdh-Progressionen | RPE |
+| `general_fitness` | Fortlaufend (zyklisch) | Sätze × Wdh | RPE / RIR |
+| `rehab_strength` | 6–12 Wochen | Sätze bei niedrigem Gewicht | Schmerzfreier ROM |
+
+Besonderheiten: Deload-Wochen alle 3–4 Wochen (-40 % Volumen), Übungslisten in `structure_json`, Split-Varianten (Push/Pull/Legs, Upper/Lower, Ganzkörper), Autoregulation via RPE/RIR.
+
+### 🏊 Schwimmen (`SwimStrategy`)
+
+| Ziel (`goal_type`) | Planstruktur | Primärmetrik | Zonenmodell |
+|---------------------|-------------|-------------|-------------|
+| `open_water_5k` | 12–16 Wochen | Meter | CSS (Critical Swim Speed) |
+| `pool_1500m` | 8–12 Wochen | Meter | CSS-Zonen |
+| `triathlon_swim_leg` | Teil eines Tri-Plans | Meter + Zeit | CSS |
+| `learn_to_swim` | Fortlaufend | Minuten + Technikdrills | RPE |
+
+Besonderheiten: Technikdrills als eigenständiger Workout-Typ, Zugfrequenz-Metriken, Intervalle in Bahnen (25m/50m).
+
+### 🏆 Multi-Sport / Hybrid
+
+| Ziel (`goal_type`) | Sportarten-Mix | Besonderheit |
+|---------------------|---------------|-------------|
+| `triathlon_sprint` | Swim + Bike + Run | 8–12 Wochen, Multi-Sport-Tage, kumulierte Ermüdung |
+| `triathlon_olympic` | Swim + Bike + Run | 12–16 Wochen, asymmetrisches Tapering |
+| `ironman_70.3` | Swim + Bike + Run | 16–24 Wochen, Brickworkouts |
+| `ironman` | Swim + Bike + Run | 24–36 Wochen, strenge Periodisierung |
+| `hyrox` | Run + Functional Fitness | 12–16 Wochen, Lauf-/Kraft-Wechsel |
+| `obstacle_race` | Run + Kraft + Grip | 12–16 Wochen, gemischte Metrik |
+| `duathlon` | Run + Bike | 10–16 Wochen |
+| `swimrun` | Swim + Run | 12–20 Wochen |
+
+Multi-Sport-Tage werden in der DB als mehrere Workouts am selben `date` mit unterschiedlichem `sport_type` abgebildet.
+
+### 🧘 Ergänzende / Randkategorien
+
+| Ziel | Machbarkeit | Anmerkung |
+|------|-------------|-----------|
+| Rudern (Ergometer/Wasser) | ✅ Gut | Ähnlich Radsport: Watt-basiert, Split-Zeiten |
+| CrossFit / Functional Fitness | ⚠️ Eingeschränkt | WODs sind semi-randomisiert; Periodisierung möglich bei strukturierten Programmen |
+| Yoga / Mobility | ⚠️ Eingeschränkt | Keine Volumen-Progression, aber als Recovery-Tag/Cross-Training integrierbar |
+| Wandern / Bergsteigen | ✅ Gut | Höhenmeter + Zeit als Metrik, ähnlich Ultra |
+| Kampfsport | ⚠️ Eingeschränkt | Ausdauer-/Kraft-Periodisierung ja, Techniktraining zu skill-basiert |
+
+## 10. GUI-Vision (Flutter App — spätere Phase)
+
+### Design-Philosophie
+- **Minimalistisch-funktional:** Klarheit von Things 3, Fokussiertheit von Nike Run Club, Tiefe von TrainingPeaks.
+- **Dark Mode first** (Sportler schauen oft morgens früh oder abends auf den Plan).
+- **Conversational Check-in** als zentrales UX-Element: Der Benutzer *redet* mit der App statt Formulare auszufüllen.
+- **Kein Gamification:** Keine Badges, Streaks oder Social-Vergleich. Die App ist ein ruhiger, kompetenter Coach — kein Fitness-Influencer.
+
+### Farbschema & Visuelles System
+- **Primärfarbe:** Kräftiges Electric Blue oder Teal — suggeriert Dynamik und Technologie.
+- **Akzente pro Sportart:** Jede Sportart hat eine subtile Akzentfarbe (Laufen = Orange, Rad = Grün, Kraft = Rot, Schwimmen = Cyan). Diese färbt Workout-Karten, Zonen-Badges und Graphen.
+- **Typografie:** Klar, serifenlos, mit monospaced Pace-/Watt-Werten (ähnlich Strava).
+
+### Screens
+
+#### Screen 1: Dashboard / Heute
+Der erste Screen nach dem Öffnen. Zeigt den heutigen Tag im Kontext der Woche.
+- **Oben:** Kompakte Statusleiste — aktuelle Trainingsphase (z. B. "Build Phase · Woche 8/24"), Wochen-Fortschrittsring (3 von 4 Workouts erledigt).
+- **Mitte: Heutige Workout-Karte** (prominentestes Element):
+  - Workout-Typ-Icon + Name ("Tempo Run")
+  - Zielwerte: "12.0 km · Zone T · 04:55–05:05 min/km"
+  - Grosser "Check-in"-Button
+  - Falls Ruhetag: beruhigende Anzeige ("Regeneration 🌿 · Nächstes Workout: morgen")
+- **Darunter:** Mini-Wochenansicht — 7 kleine Kreise (Mo–So), farbig nach Status:
+  - Ausgefüllt grün = erledigt, orange = teilweise, Umriss = geplant, grau = Ruhetag, rot pulsierend = Zwangspause (SICK/PAIN).
+- **Unten:** Optionaler Insight-Streifen: "Dein Wochenvolumen: 42 von 48 km (88 %)" oder "RPE-Trend: stabil bei 5.2".
+
+#### Screen 2: Conversational Check-in
+Öffnet sich nach Tippen auf den Check-in-Button. Das Herzstück der App.
+- **Chat-Interface:** Sieht aus wie ein Messenger. Oben steht das geplante Workout als Kontext-Karte.
+- Der Benutzer tippt Freitext: *"Heute 10 km gelaufen, letzter Kilometer war zäh. Leichtes Ziehen im linken Knie, RPE so 7."*
+- Die App zeigt nach dem LLM-Parsing eine **strukturierte Zusammenfassung** als Antwort-Bubble:
+  - ✅ 10.0 km (Ziel: 12.0 km) → Partial
+  - 💪 RPE: 7
+  - ⚠️ Knie links · leichter Schmerz · Schweregrad 3
+- **"Stimmt das so?"** mit Bestätigen / Korrigieren-Buttons.
+- Nach Bestätigung: Wenn Mutationen ausgelöst werden, freundliche Erklärung:
+  - *"Wegen des Knieschmerzes habe ich dein Tempo-Workout am Donnerstag in einen Ruhetag umgewandelt."*
+  - Vorher-/Nachher-Vergleich als Karten-Carousel.
+
+#### Screen 3: Wochenplan
+Kalenderartige Übersicht der aktuellen und nächsten Wochen.
+- **Horizontales Scrolling** durch die Wochen (swipe links/rechts).
+- Jeder Tag ist eine Karte mit: Workout-Typ (Icon + Name), Metriken ("18 km · Easy"), Status-Badge.
+- Aktuelle Woche prominent, vergangene leicht ausgegraut.
+- Am oberen Rand: Phase-Label + Mesozyklus-Indikator ("Woche 3 von 4 vor Deload").
+
+#### Screen 4: Planübersicht (Makrozyklus)
+Bird's-Eye-View des gesamten Trainingsplans.
+- **Vertikale Zeitleiste** mit farbigen Phasen-Blöcken: Base (Blau) → Build (Orange) → Peak (Rot) → Taper (Grün) → Race Day (Gold-Stern).
+- Jede Woche ist eine horizontale Zeile mit: Wochennummer + Datum, Volumen-Balken, Recovery-Markierung.
+- Aktueller Standort durch "Du bist hier"-Marker hervorgehoben.
+- Volumen-Kurve als dezenter Graph über dem Ganzen (Wellenbewegung der Mesozyklen).
+
+#### Screen 5: Profil & Zonen
+Einstellungen und Leistungsdaten des Benutzers.
+- Persönliche Daten: Alter, Gewicht, Ruhepuls, Max-Puls.
+- Leistungswerte pro Sportart: VDOT (Laufen), FTP (Rad), 1RM-Werte (Kraft).
+- Berechnete Zonen als Tabelle (Zonenname, Pace-/Watt-Bereich, HR-Bereich).
+- Button "Zonen neu berechnen" (nach neuem Wettkampf/Test).
+- Aktive Pläne: Liste mit Sport-Icon, Zielname und Countdown ("Marathon Zürich · noch 16 Wochen").
+
+#### Screen 6: Onboarding-Flow
+Erstmaliges Einrichten oder neuen Plan erstellen.
+- **Conversational statt Formular:** Benutzer beschreibt Ziel in Freitext, App parsed via LLM und zeigt Zusammenfassung zur Bestätigung.
+- Falls LLM offline: Fallback auf geführte Einzelabfragen (Dropdown für Sportart, Slider für Volumen etc.).
+- Am Ende: Animation, der Plan "baut sich auf" (Wochen fliegen als Karten rein).
+
+#### Screen 7: Status-Updates & Genesungs-Tracker
+Für Phasen abseits normaler Check-ins.
+- **"Wie geht's dir?"-Button** auf dem Dashboard (immer sichtbar).
+- Bei Krankheit: App aktiviert SICK-Modus, zeigt Timeline ("Krank seit Mo, 15.09. · Tag 3"), pausiert alle Workouts.
+- Bei Genesungsmeldung: App zeigt Rückkehrplan ("Erstes Workout auf 50 % reduziert, kein Tempo bis Freitag").
+- Schmerztagebuch: Täglicher Kurz-Check "Wie ist das Knie heute? (1–10)" mit Verlaufsgraph.
+
+#### Screen 8: Statistiken & Trends
+Langfristige Auswertung.
+- Wochenvolumen-Graph: Balkendiagramm Soll vs. Ist über den Planverlauf.
+- RPE-Trend: Liniengraph der durchschnittlichen RPE pro Woche (Frühwarnung bei steigendem Trend).
+- Consistency Score: Prozent der absolvierten Workouts (motivierend, aber ohne Gamification-Druck).
+- Symptom-History: Zeitstrahl mit Schmerz-/Krankheitsereignissen.
+
+### Navigation & UX-Prinzipien
+- **Bottom Tab Bar:** 4 Tabs — Heute · Plan · Statistiken · Profil.
+- **Floating Action Button:** "Neuer Check-in" (immer erreichbar, auch für spontane Aktivitäten).
+- **Pull-to-Refresh** auf dem Dashboard aktualisiert Mutationen.
+- **Notifications (optional):** Sanfte Erinnerung am Trainingsmorgen ("Heute steht ein Tempo-Lauf an: 10 km · Zone T"). Keine Push-Notification-Flut.
+
