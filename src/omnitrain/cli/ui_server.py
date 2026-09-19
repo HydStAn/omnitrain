@@ -39,18 +39,23 @@ def get_db() -> Database:
 
 
 @app.get("/api/state")
-def get_state():
+def get_state(plan_id: Optional[str] = None):
     db = get_db()
     today_str = date.today().isoformat()
     with db.get_connection() as conn:
-        plan_row = conn.execute(
-            "SELECT * FROM plans WHERE status = 'active' ORDER BY created_at DESC LIMIT 1;"
-        ).fetchone()
+        all_plans = conn.execute(
+            "SELECT * FROM plans ORDER BY created_at DESC;"
+        ).fetchall()
 
-        if not plan_row:
-            return {"active_plan": None}
+        if not all_plans:
+            return {"active_plan": None, "all_plans": []}
 
-        plan_id = plan_row["id"]
+        if plan_id:
+            plan_row = next((p for p in all_plans if p["id"] == plan_id), all_plans[0])
+        else:
+            plan_row = all_plans[0]
+
+        selected_plan_id = plan_row["id"]
 
         # 1. Next / Current Workouts
         workouts = conn.execute(
@@ -59,7 +64,7 @@ def get_state():
             WHERE week_id IN (SELECT id FROM weeks WHERE plan_id = ?)
             ORDER BY date ASC;
             """,
-            (plan_id,)
+            (selected_plan_id,)
         ).fetchall()
 
         # 2. Zones
@@ -80,11 +85,12 @@ def get_state():
             loads.append(DailyLoad(date=c["timestamp"][:10], tss=tss))
         pmc_points = PMCEngine.calculate_pmc_series(loads)
         latest_pmc = pmc_points[-1].model_dump() if pmc_points else {"ctl": 0.0, "atl": 0.0, "tsb": 0.0}
+        pmc_series_data = [p.model_dump() for p in pmc_points[-30:]] if pmc_points else []
 
         # 4. Weeks
         weeks = conn.execute(
             "SELECT * FROM weeks WHERE plan_id = ? ORDER BY week_number ASC;",
-            (plan_id,)
+            (selected_plan_id,)
         ).fetchall()
 
         # Group workouts by date
@@ -93,18 +99,28 @@ def get_state():
         if not today_workout:
             today_workout = next((w for w in w_list if w["status"] == "planned" and w["date"] >= today_str), None)
 
+        # Check if plan has active sickness pause (workouts marked rest due to sickness)
+        has_sick_workouts = any(
+            w["date"] >= today_str and "Krankheit" in (w["intensity_detail"] or "")
+            for w in w_list
+        )
+
         return {
             "active_plan": dict(plan_row),
+            "all_plans": [dict(p) for p in all_plans],
             "today_workout": today_workout,
             "workouts": w_list,
             "weeks": [dict(w) for w in weeks],
             "zones": zones,
-            "pmc": latest_pmc
+            "pmc": latest_pmc,
+            "pmc_series": pmc_series_data,
+            "is_sick_mode": has_sick_workouts
         }
 
 
 class CheckinRequest(BaseModel):
     freetext: str
+    plan_id: Optional[str] = None
 
 
 @app.post("/api/checkin")
@@ -117,23 +133,61 @@ def post_checkin(req: CheckinRequest):
     event = parser.parse(req.freetext)
 
     with db.get_connection() as conn:
-        plan_row = conn.execute("SELECT user_id FROM plans WHERE status = 'active' LIMIT 1;").fetchone()
-        user_id = plan_row["user_id"] if plan_row else "default-user"
+        if req.plan_id:
+            plan_row = conn.execute("SELECT * FROM plans WHERE id = ? LIMIT 1;", (req.plan_id,)).fetchone()
+        else:
+            plan_row = conn.execute("SELECT * FROM plans ORDER BY created_at DESC LIMIT 1;").fetchone()
+
+        if not plan_row:
+            raise HTTPException(status_code=404, detail="No active plan found")
+
+        selected_plan_id = plan_row["id"]
+        user_id = plan_row["user_id"]
 
         open_wo = conn.execute(
-            "SELECT * FROM workouts WHERE status = 'planned' AND date <= ? ORDER BY date DESC LIMIT 1;",
-            (today.isoformat(),)
+            """
+            SELECT w.* FROM workouts w
+            JOIN weeks wk ON w.week_id = wk.id
+            WHERE wk.plan_id = ? AND w.status = 'planned' AND w.date <= ?
+            ORDER BY w.date DESC LIMIT 1;
+            """,
+            (selected_plan_id, today.isoformat())
         ).fetchone()
 
         if not open_wo:
-            open_wo = conn.execute("SELECT * FROM workouts WHERE date = ? LIMIT 1;", (today.isoformat(),)).fetchone()
+            open_wo = conn.execute(
+                """
+                SELECT w.* FROM workouts w
+                JOIN weeks wk ON w.week_id = wk.id
+                WHERE wk.plan_id = ? AND w.date = ? LIMIT 1;
+                """,
+                (selected_plan_id, today.isoformat())
+            ).fetchone()
 
         matched_wo_id = open_wo["id"] if open_wo else None
 
         upcoming_rows = conn.execute(
-            "SELECT * FROM workouts WHERE status = 'planned' AND date >= ? ORDER BY date ASC LIMIT 10;",
-            (today.isoformat(),)
+            """
+            SELECT w.* FROM workouts w
+            JOIN weeks wk ON w.week_id = wk.id
+            WHERE wk.plan_id = ? AND w.status = 'planned' AND w.date >= ?
+            ORDER BY w.date ASC LIMIT 10;
+            """,
+            (selected_plan_id, today.isoformat())
         ).fetchall()
+
+        # Capture "before" state for comparison
+        before_state = {
+            r["id"]: {
+                "id": r["id"],
+                "date": r["date"],
+                "workout_type": r["workout_type"],
+                "metric_primary": r["metric_primary"],
+                "metric_unit": r["metric_unit"],
+                "intensity_detail": r["intensity_detail"]
+            }
+            for r in upcoming_rows
+        }
 
         upcoming_workouts = [
             Workout(
@@ -158,7 +212,31 @@ def post_checkin(req: CheckinRequest):
             upcoming_workouts=upcoming_workouts
         )
 
+        diffs = []
         for wo in upcoming_workouts:
+            before = before_state.get(wo.id)
+            if before and (
+                before["workout_type"] != wo.workout_type or
+                before["metric_primary"] != wo.metric_primary or
+                before["intensity_detail"] != wo.intensity_detail
+            ):
+                diffs.append({
+                    "id": wo.id,
+                    "date": str(wo.date),
+                    "before": {
+                        "workout_type": before["workout_type"],
+                        "metric_primary": before["metric_primary"],
+                        "metric_unit": before["metric_unit"],
+                        "intensity_detail": before["intensity_detail"]
+                    },
+                    "after": {
+                        "workout_type": wo.workout_type,
+                        "metric_primary": wo.metric_primary,
+                        "metric_unit": wo.metric_unit,
+                        "intensity_detail": wo.intensity_detail
+                    }
+                })
+
             conn.execute(
                 """
                 UPDATE workouts 
@@ -196,8 +274,145 @@ def post_checkin(req: CheckinRequest):
 
     return {
         "event": event.model_dump(),
-        "mutations": [m.model_dump() for m in mutations]
+        "mutations": [m.model_dump() for m in mutations],
+        "diffs": diffs
     }
+
+
+class StatusUpdateRequest(BaseModel):
+    update_type: str  # recovery, pain_resolved, readiness
+    note: Optional[str] = None
+    severity: Optional[int] = None
+    plan_id: Optional[str] = None
+
+
+@app.post("/api/status-update")
+def post_status_update(req: StatusUpdateRequest):
+    db = get_db()
+    today = date.today()
+    now_dt = datetime.now(timezone.utc)
+
+    u_type = UpdateType.RECOVERY
+    details = {}
+    if req.update_type == "recovery":
+        u_type = UpdateType.RECOVERY
+        details = {"condition": "sickness", "status": "resolved"}
+    elif req.update_type in ["pain_resolved", "pain"]:
+        u_type = UpdateType.PAIN_UPDATE
+        details = {"status": "resolved"}
+    elif req.update_type in ["readiness", "fatigue"]:
+        u_type = UpdateType.READINESS_UPDATE
+        details = {"severity": req.severity or 8}
+
+    event = StatusUpdateEvent(update_type=u_type, details=details, notes=req.note)
+
+    with db.get_connection() as conn:
+        if req.plan_id:
+            plan_row = conn.execute("SELECT * FROM plans WHERE id = ? LIMIT 1;", (req.plan_id,)).fetchone()
+        else:
+            plan_row = conn.execute("SELECT * FROM plans ORDER BY created_at DESC LIMIT 1;").fetchone()
+
+        if not plan_row:
+            raise HTTPException(status_code=404, detail="No active plan found")
+
+        selected_plan_id = plan_row["id"]
+
+        upcoming_rows = conn.execute(
+            """
+            SELECT w.* FROM workouts w
+            JOIN weeks wk ON w.week_id = wk.id
+            WHERE wk.plan_id = ? AND w.date >= ?
+            ORDER BY w.date ASC LIMIT 14;
+            """,
+            (selected_plan_id, today.isoformat())
+        ).fetchall()
+
+        before_state = {
+            r["id"]: {
+                "id": r["id"],
+                "date": r["date"],
+                "workout_type": r["workout_type"],
+                "metric_primary": r["metric_primary"],
+                "metric_unit": r["metric_unit"],
+                "intensity_detail": r["intensity_detail"]
+            }
+            for r in upcoming_rows
+        }
+
+        upcoming_workouts = [
+            Workout(
+                id=r["id"],
+                week_id=r["week_id"],
+                sport_type=SportType(r["sport_type"]),
+                date=date.fromisoformat(r["date"]),
+                day_of_week=r["day_of_week"],
+                workout_type=r["workout_type"],
+                metric_primary=r["metric_primary"],
+                metric_unit=r["metric_unit"],
+                intensity_target=r["intensity_target"],
+                intensity_detail=r["intensity_detail"],
+                status=CompletionStatus(r["status"])
+            )
+            for r in upcoming_rows
+        ]
+
+        mutations = StatusUpdateHandler.handle_status_update(
+            update=event,
+            current_date=today,
+            upcoming_workouts=upcoming_workouts
+        )
+
+        diffs = []
+        for wo in upcoming_workouts:
+            before = before_state.get(wo.id)
+            if before and (
+                before["workout_type"] != wo.workout_type or
+                before["metric_primary"] != wo.metric_primary or
+                before["intensity_detail"] != wo.intensity_detail
+            ):
+                diffs.append({
+                    "id": wo.id,
+                    "date": str(wo.date),
+                    "before": {
+                        "workout_type": before["workout_type"],
+                        "metric_primary": before["metric_primary"],
+                        "metric_unit": before["metric_unit"],
+                        "intensity_detail": before["intensity_detail"]
+                    },
+                    "after": {
+                        "workout_type": wo.workout_type,
+                        "metric_primary": wo.metric_primary,
+                        "metric_unit": wo.metric_unit,
+                        "intensity_detail": wo.intensity_detail
+                    }
+                })
+
+            conn.execute(
+                """
+                UPDATE workouts
+                SET workout_type = ?, metric_primary = ?, intensity_target = ?, intensity_detail = ?, updated_at = ?
+                WHERE id = ?;
+                """,
+                (wo.workout_type, wo.metric_primary, wo.intensity_target, wo.intensity_detail, now_dt.isoformat(), wo.id)
+            )
+        conn.commit()
+
+    return {
+        "status": "ok",
+        "mutations": [m.model_dump() for m in mutations],
+        "diffs": diffs
+    }
+
+
+class CheckinPreviewRequest(BaseModel):
+    freetext: str
+
+
+@app.post("/api/checkin/preview")
+def preview_checkin(req: CheckinPreviewRequest):
+    parser = CheckinParser()
+    event = parser.parse(req.freetext)
+    return {"event": event.model_dump()}
 
 
 class GoalRequest(BaseModel):
@@ -228,6 +443,7 @@ def index():
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OmniTrain · Adaptive Multi-Sport Coach</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
@@ -262,7 +478,7 @@ def index():
   <div class="w-full max-w-xl flex flex-col gap-6">
 
     <!-- Top Navigation / Status Header -->
-    <header class="flex items-center justify-between border-b border-slate-800/80 pb-4">
+    <header class="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800/80 pb-4 gap-3">
       <div>
         <div class="flex items-center gap-2">
           <span class="w-2.5 h-2.5 rounded-full bg-teal-400 animate-pulse"></span>
@@ -272,11 +488,31 @@ def index():
         <p id="plan-title" class="text-xs text-slate-400 mt-0.5">Lade Trainingsplan...</p>
       </div>
       <div class="flex items-center gap-2">
-        <button onclick="openOnboardModal()" class="text-xs font-medium px-3 py-1.5 rounded-lg bg-teal-600/20 text-teal-400 border border-teal-500/30 hover:bg-teal-600/30 transition">
-          + Neues Ziel
+        <select id="plan-selector" onchange="onPlanSelect(this.value)" class="text-xs bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-teal-500 font-medium">
+          <!-- Dynamically populated -->
+        </select>
+        <button onclick="openStatusModal()" class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30 transition flex items-center gap-1.5">
+          <span>🩺</span> Wie geht's dir?
+        </button>
+        <button onclick="openOnboardModal()" class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white shadow transition">
+          + Ziel
         </button>
       </div>
     </header>
+
+    <!-- SICK Mode Banner (Dynamically displayed when active) -->
+    <div id="sick-banner" class="hidden glass-card border-rose-500/40 bg-rose-950/40 rounded-2xl p-4 flex items-center justify-between gap-3 text-rose-200 text-xs">
+      <div class="flex items-center gap-3">
+        <span class="text-2xl">🤒</span>
+        <div>
+          <div class="font-bold text-rose-300 text-sm">Krankheitsmodus aktiv</div>
+          <div class="text-rose-300/80 text-[11px] mt-0.5">Alle Workouts pausiert. Ruhe dich aus und schone deinen Körper.</div>
+        </div>
+      </div>
+      <button onclick="submitStatusUpdate('recovery', 'Wieder fit und symptomfrei!')" class="shrink-0 px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-lg transition flex items-center gap-1">
+        <span>🌱</span> Wieder gesund melden
+      </button>
+    </div>
 
     <!-- PMC Metrics Pill Bar -->
     <div id="pmc-bar" class="grid grid-cols-3 gap-2 text-center text-xs">
@@ -293,6 +529,24 @@ def index():
         <span id="pmc-tsb" class="font-mono text-base font-bold text-amber-400">--</span>
       </div>
     </div>
+
+    <!-- Screen 8: PMC Chart Canvas Section -->
+    <section class="glass-card rounded-2xl p-4 border border-slate-800/80">
+      <div class="flex justify-between items-center mb-3">
+        <div class="flex items-center gap-2">
+          <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">PMC Trend (Banister Impulse)</span>
+          <span class="text-[10px] text-teal-400 font-mono">CTL · ATL · TSB</span>
+        </div>
+        <div class="flex items-center gap-3 text-[10px] font-mono">
+          <span class="flex items-center gap-1 text-teal-400"><span class="w-2 h-2 rounded-full bg-teal-400 inline-block"></span> CTL</span>
+          <span class="flex items-center gap-1 text-purple-400"><span class="w-2 h-2 rounded-full bg-purple-400 inline-block"></span> ATL</span>
+          <span class="flex items-center gap-1 text-amber-400"><span class="w-2 h-2 rounded-full bg-amber-400 inline-block"></span> TSB</span>
+        </div>
+      </div>
+      <div class="h-44 w-full relative">
+        <canvas id="pmcChart"></canvas>
+      </div>
+    </section>
 
     <!-- Screen 1: Heutiges Workout (Hero Card) -->
     <section class="glass-card rounded-2xl p-5 shadow-2xl relative overflow-hidden border border-teal-500/20">
@@ -339,13 +593,13 @@ def index():
         <h3 class="text-sm font-semibold tracking-tight text-slate-200">Conversational Coach</h3>
       </div>
 
-      <div id="chat-messages" class="flex flex-col gap-2.5 max-h-64 overflow-y-auto mb-3 text-sm pr-1">
+      <div id="chat-messages" class="flex flex-col gap-3 max-h-80 overflow-y-auto mb-3 text-sm pr-1">
         <div class="bg-slate-800/80 rounded-2xl rounded-tl-sm p-3 max-w-[88%] text-slate-300">
           Wie war dein Training heute? Erzähl mir frei von Distanz, Gefühl (RPE 1-10) oder etwaigen Schmerzen / Symptomen.
         </div>
       </div>
 
-      <form onsubmit="submitCheckin(event)" class="relative flex items-center">
+      <form onsubmit="handleCheckinSubmit(event)" class="relative flex items-center">
         <input id="checkin-input" type="text" placeholder="z.B. '6 km gelaufen, Knie zwickt leicht (3/10), sonst RPE 6'" 
                class="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 pl-3.5 pr-12 text-sm text-slate-200 focus:outline-none focus:border-teal-500 transition placeholder-slate-500">
         <button type="submit" class="absolute right-1.5 p-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white transition">
@@ -381,6 +635,49 @@ def index():
 
   </div>
 
+  <!-- Screen 7: "Wie geht's dir?" Modal -->
+  <div id="status-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+    <div class="glass-card bg-slate-900 border border-slate-700 w-full max-w-md rounded-2xl p-6 shadow-2xl">
+      <div class="flex justify-between items-center mb-3">
+        <h3 class="text-lg font-bold flex items-center gap-2">
+          <span>🩺</span> Wie geht's dir?
+        </h3>
+        <button onclick="closeStatusModal()" class="text-slate-400 hover:text-white text-sm">✕</button>
+      </div>
+      <p class="text-xs text-slate-400 mb-4">Wähle deinen aktuellen Gesundheitsstatus für automatische Anpassungen deines Trainingsplans:</p>
+      
+      <div class="flex flex-col gap-2.5">
+        <button onclick="submitStatusUpdate('recovery', 'Vollständig genesen')" class="p-3 rounded-xl bg-slate-950/70 border border-emerald-500/30 hover:border-emerald-500 hover:bg-emerald-950/20 text-left transition flex items-start gap-3 group">
+          <span class="text-xl">🌱</span>
+          <div>
+            <div class="text-sm font-semibold text-emerald-400 group-hover:text-emerald-300">Wieder gesund (Recovery)</div>
+            <div class="text-xs text-slate-400 mt-0.5">Aktiviert Wiederaufbau: 1. Training 50% Volumen, 4 Tage kein Tempotraining.</div>
+          </div>
+        </button>
+
+        <button onclick="submitStatusUpdate('pain_resolved', 'Schmerzen vollständig abgeklungen')" class="p-3 rounded-xl bg-slate-950/70 border border-teal-500/30 hover:border-teal-500 hover:bg-teal-950/20 text-left transition flex items-start gap-3 group">
+          <span class="text-xl">🩹</span>
+          <div>
+            <div class="text-sm font-semibold text-teal-400 group-hover:text-teal-300">Schmerzfrei (Pain Resolved)</div>
+            <div class="text-xs text-slate-400 mt-0.5">Beendet Schmerzpause, stellt geplante Einheiten als Easy-Runs wieder her.</div>
+          </div>
+        </button>
+
+        <button onclick="submitStatusUpdate('readiness', 'Akute Erschöpfung / Schlechter Schlaf', 8)" class="p-3 rounded-xl bg-slate-950/70 border border-amber-500/30 hover:border-amber-500 hover:bg-amber-950/20 text-left transition flex items-start gap-3 group">
+          <span class="text-xl">💤</span>
+          <div>
+            <div class="text-sm font-semibold text-amber-400 group-hover:text-amber-300">Erschöpft / Müde (Fatigue)</div>
+            <div class="text-xs text-slate-400 mt-0.5">Drosselt Tempo- & Intervall-Einheiten der nächsten 48h auf Zone Easy.</div>
+          </div>
+        </button>
+      </div>
+
+      <div class="flex justify-end mt-4">
+        <button onclick="closeStatusModal()" class="px-4 py-2 text-xs font-medium text-slate-400 hover:text-white">Schließen</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Onboard Modal -->
   <div id="onboard-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
     <div class="glass-card bg-slate-900 border border-slate-700 w-full max-w-md rounded-2xl p-6 shadow-2xl">
@@ -396,15 +693,27 @@ def index():
 
   <script>
     let appState = null;
+    let currentPlanId = null;
+    let pendingCheckinText = null;
+    let pmcChartInstance = null;
 
-    async function loadState() {
+    async function loadState(planId = null) {
       try {
-        const res = await fetch('/api/state');
+        const url = planId ? `/api/state?plan_id=${planId}` : (currentPlanId ? `/api/state?plan_id=${currentPlanId}` : '/api/state');
+        const res = await fetch(url);
         appState = await res.json();
+        if (appState && appState.active_plan) {
+          currentPlanId = appState.active_plan.id;
+        }
         render();
       } catch (err) {
-        console.error(err);
+        console.error("State loading error:", err);
       }
+    }
+
+    function onPlanSelect(selectedId) {
+      currentPlanId = selectedId;
+      loadState(selectedId);
     }
 
     function render() {
@@ -415,10 +724,34 @@ def index():
       const plan = appState.active_plan;
       document.getElementById('plan-title').innerText = `${plan.sport_type.toUpperCase()} · ${plan.goal_type.replace('_', ' ').toUpperCase()} (Ziel: ${plan.target_date})`;
 
-      // PMC
+      // Populate plan selector
+      const selector = document.getElementById('plan-selector');
+      if (appState.all_plans) {
+        selector.innerHTML = '';
+        appState.all_plans.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          opt.innerText = `${p.sport_type.toUpperCase()}: ${p.goal_type.replace('_', ' ').toUpperCase()} (${p.target_date})`;
+          if (p.id === plan.id) opt.selected = true;
+          selector.appendChild(opt);
+        });
+      }
+
+      // Sick Banner toggle
+      const sickBanner = document.getElementById('sick-banner');
+      if (appState.is_sick_mode) {
+        sickBanner.classList.remove('hidden');
+      } else {
+        sickBanner.classList.add('hidden');
+      }
+
+      // PMC Numbers
       document.getElementById('pmc-ctl').innerText = appState.pmc.ctl;
       document.getElementById('pmc-atl').innerText = appState.pmc.atl;
       document.getElementById('pmc-tsb').innerText = appState.pmc.tsb;
+
+      // PMC Chart
+      renderPMCChart(appState.pmc_series || []);
 
       // Today
       const tw = appState.today_workout;
@@ -440,13 +773,106 @@ def index():
       renderMacro();
     }
 
+    function renderPMCChart(series) {
+      const ctx = document.getElementById('pmcChart');
+      if (!ctx) return;
+
+      // Generate dates if few points exist
+      let labels = [];
+      let ctlData = [];
+      let atlData = [];
+      let tsbData = [];
+
+      if (series.length === 0) {
+        // Fallback placeholder baseline
+        labels = ['Tag -6', 'Tag -5', 'Tag -4', 'Tag -3', 'Tag -2', 'Gestern', 'Heute'];
+        ctlData = [12, 13, 14, 14, 15, 16, 16.5];
+        atlData = [18, 22, 19, 25, 20, 24, 22.0];
+        tsbData = [-6, -9, -5, -11, -5, -8, -5.5];
+      } else {
+        labels = series.map(p => p.date.slice(5)); // 'MM-DD'
+        ctlData = series.map(p => p.ctl);
+        atlData = series.map(p => p.atl);
+        tsbData = series.map(p => p.tsb);
+      }
+
+      if (pmcChartInstance) {
+        pmcChartInstance.destroy();
+      }
+
+      pmcChartInstance = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [
+            {
+              label: 'CTL (Fitness)',
+              data: ctlData,
+              borderColor: '#14B8A6', // Teal
+              backgroundColor: 'rgba(20, 184, 166, 0.1)',
+              borderWidth: 2,
+              tension: 0.3,
+              pointRadius: 3,
+              fill: false
+            },
+            {
+              label: 'ATL (Fatigue)',
+              data: atlData,
+              borderColor: '#C084FC', // Purple
+              backgroundColor: 'rgba(192, 132, 252, 0.1)',
+              borderWidth: 2,
+              tension: 0.3,
+              pointRadius: 3,
+              fill: false
+            },
+            {
+              label: 'TSB (Form)',
+              data: tsbData,
+              borderColor: '#FBBF24', // Amber
+              backgroundColor: 'rgba(251, 191, 36, 0.1)',
+              borderWidth: 1.5,
+              borderDash: [3, 3],
+              tension: 0.3,
+              pointRadius: 2,
+              fill: true
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#0F172A',
+              borderColor: '#334155',
+              borderWidth: 1,
+              padding: 8,
+              bodyFont: { family: 'Inter', size: 11 },
+              titleFont: { family: 'Inter', size: 11, weight: 'bold' }
+            }
+          },
+          scales: {
+            x: {
+              grid: { color: 'rgba(255, 255, 255, 0.05)' },
+              ticks: { color: '#64748B', font: { size: 10 } }
+            },
+            y: {
+              grid: { color: 'rgba(255, 255, 255, 0.05)' },
+              ticks: { color: '#64748B', font: { size: 10 } }
+            }
+          }
+        }
+      });
+    }
+
     function renderWeekDots() {
       const container = document.getElementById('week-dots');
       container.innerHTML = '';
       const days = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
       const todayStr = new Date().toISOString().slice(0, 10);
 
-      // Take next 7 workouts or current week
       const currentWeekWorkouts = appState.workouts.slice(0, 7);
       days.forEach((dayName, idx) => {
         const wo = currentWeekWorkouts.find(w => w.day_of_week === (idx + 1));
@@ -512,7 +938,8 @@ def index():
       document.getElementById('checkin-input').focus();
     }
 
-    async function submitCheckin(e) {
+    // Step 1: User sends message -> Preview parse and ask for confirmation
+    async function handleCheckinSubmit(e) {
       e.preventDefault();
       const input = document.getElementById('checkin-input');
       const text = input.value.trim();
@@ -523,19 +950,111 @@ def index():
       input.value = '';
       chat.scrollTop = chat.scrollHeight;
 
+      pendingCheckinText = text;
+
       try {
-        const res = await fetch('/api/checkin', {
+        const res = await fetch('/api/checkin/preview', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({freetext: text})
         });
         const data = await res.json();
-        
-        let reply = `✅ Status: <strong>${data.event.completion_status.toUpperCase()}</strong> (RPE: ${data.event.perceived_rpe || '-'})`;
-        if (data.mutations && data.mutations.length > 0) {
-          reply += `<div class="mt-2 pt-2 border-t border-slate-700/60 text-xs text-amber-300">${data.mutations[0].description}</div>`;
+        const ev = data.event;
+
+        let pillsHtml = `<div class="flex flex-wrap gap-1.5 mt-2">`;
+        pillsHtml += `<span class="px-2 py-0.5 rounded-md bg-teal-500/20 text-teal-300 border border-teal-500/30 text-[11px] font-mono">Status: ${ev.completion_status.toUpperCase()}</span>`;
+        if (ev.actual_metrics && ev.actual_metrics.metric_primary) {
+          pillsHtml += `<span class="px-2 py-0.5 rounded-md bg-slate-700 text-slate-200 text-[11px] font-mono">${ev.actual_metrics.metric_primary} ${ev.actual_metrics.unit}</span>`;
         }
-        chat.innerHTML += `<div class="bg-slate-800 rounded-2xl rounded-tl-sm p-3 max-w-[88%] text-slate-200 text-sm">${reply}</div>`;
+        if (ev.perceived_rpe) {
+          pillsHtml += `<span class="px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[11px] font-mono">RPE: ${ev.perceived_rpe}/10</span>`;
+        }
+        if (ev.symptoms && ev.symptoms.length > 0) {
+          ev.symptoms.forEach(s => {
+            pillsHtml += `<span class="px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px] font-mono">⚠️ ${s.type} (${s.severity}/10)</span>`;
+          });
+        }
+        pillsHtml += `</div>`;
+
+        const confirmId = 'confirm-' + Date.now();
+        const confirmationBubble = `
+          <div id="${confirmId}" class="bg-slate-800 rounded-2xl rounded-tl-sm p-3 max-w-[90%] text-slate-200 text-sm border border-teal-500/30">
+            <div class="font-semibold text-teal-300">Ich habe Folgendes verstanden:</div>
+            ${pillsHtml}
+            <div class="mt-3 pt-2.5 border-t border-slate-700 flex items-center justify-between gap-2">
+              <span class="text-xs text-slate-300 font-medium">Stimmt das so?</span>
+              <div class="flex gap-2">
+                <button onclick="discardConfirmation('${confirmId}')" class="px-2.5 py-1 text-xs rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition">Verwerfen</button>
+                <button onclick="executeCheckin('${confirmId}')" class="px-3 py-1 text-xs font-semibold rounded-lg bg-teal-600 hover:bg-teal-500 text-white shadow transition">Bestätigen</button>
+              </div>
+            </div>
+          </div>
+        `;
+        chat.innerHTML += confirmationBubble;
+        chat.scrollTop = chat.scrollHeight;
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    function discardConfirmation(bubbleId) {
+      const bubble = document.getElementById(bubbleId);
+      if (bubble) {
+        bubble.innerHTML = `<span class="text-xs text-slate-400 italic">Eingabe verworfen. Bitte beschreibe es noch einmal genauer.</span>`;
+      }
+      pendingCheckinText = null;
+    }
+
+    // Step 2: User confirms -> Apply mutations and show Before/After comparison
+    async function executeCheckin(bubbleId) {
+      if (!pendingCheckinText) return;
+      const textToPost = pendingCheckinText;
+      pendingCheckinText = null;
+
+      const bubble = document.getElementById(bubbleId);
+      if (bubble) {
+        bubble.querySelector('.flex.items-center.justify-between')?.remove();
+      }
+
+      const chat = document.getElementById('chat-messages');
+
+      try {
+        const res = await fetch('/api/checkin', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            freetext: textToPost,
+            plan_id: currentPlanId
+          })
+        });
+        const data = await res.json();
+
+        let reply = `✅ Workout gespeichert! Status: <strong>${data.event.completion_status.toUpperCase()}</strong>`;
+        if (data.mutations && data.mutations.length > 0) {
+          reply += `<div class="mt-2 pt-2 border-t border-slate-700/60 text-xs text-amber-300 font-medium">${data.mutations[0].description}</div>`;
+        }
+
+        // Before / After Diff Cards
+        if (data.diffs && data.diffs.length > 0) {
+          reply += `<div class="mt-3 pt-2.5 border-t border-slate-700 flex flex-col gap-2">
+            <span class="text-[11px] font-bold uppercase tracking-wider text-slate-400">Plan-Anpassungen (Vorher vs. Nachher):</span>`;
+          data.diffs.forEach(d => {
+            reply += `
+              <div class="p-2 rounded-xl bg-slate-950/80 border border-slate-700/80 text-xs flex flex-col gap-1">
+                <span class="font-mono text-slate-400 font-semibold text-[11px]">${d.date}</span>
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-300 line-through text-[11px]">${d.before.workout_type.toUpperCase()} · ${d.before.metric_primary}${d.before.metric_unit}</span>
+                  <span class="text-slate-500">→</span>
+                  <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold text-[11px]">${d.after.workout_type.toUpperCase()} · ${d.after.metric_primary}${d.after.metric_unit}</span>
+                </div>
+                ${d.after.intensity_detail ? `<span class="text-[10px] text-slate-400 italic">${d.after.intensity_detail}</span>` : ''}
+              </div>
+            `;
+          });
+          reply += `</div>`;
+        }
+
+        chat.innerHTML += `<div class="bg-slate-800 rounded-2xl rounded-tl-sm p-3 max-w-[92%] text-slate-200 text-sm border border-slate-700">${reply}</div>`;
         chat.scrollTop = chat.scrollHeight;
 
         await loadState();
@@ -544,6 +1063,62 @@ def index():
       }
     }
 
+    // Modal controls: "Wie geht's dir?"
+    function openStatusModal() { document.getElementById('status-modal').classList.remove('hidden'); }
+    function closeStatusModal() { document.getElementById('status-modal').classList.add('hidden'); }
+
+    async function submitStatusUpdate(type, note, severity = null) {
+      closeStatusModal();
+      const chat = document.getElementById('chat-messages');
+      chat.innerHTML += `<div class="bg-amber-600 text-white rounded-2xl rounded-tr-sm p-2.5 max-w-[85%] self-end text-xs font-semibold">🩺 Status-Update: ${note}</div>`;
+
+      try {
+        const res = await fetch('/api/status-update', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            update_type: type,
+            note: note,
+            severity: severity,
+            plan_id: currentPlanId
+          })
+        });
+        const data = await res.json();
+
+        let reply = `✅ Gesundheits-Update verarbeitet.`;
+        if (data.mutations && data.mutations.length > 0) {
+          reply += `<div class="mt-2 pt-2 border-t border-slate-700/60 text-xs text-amber-300 font-medium">${data.mutations[0].description}</div>`;
+        }
+
+        if (data.diffs && data.diffs.length > 0) {
+          reply += `<div class="mt-3 pt-2.5 border-t border-slate-700 flex flex-col gap-2">
+            <span class="text-[11px] font-bold uppercase tracking-wider text-slate-400">Plan-Anpassungen (Vorher vs. Nachher):</span>`;
+          data.diffs.forEach(d => {
+            reply += `
+              <div class="p-2 rounded-xl bg-slate-950/80 border border-slate-700/80 text-xs flex flex-col gap-1">
+                <span class="font-mono text-slate-400 font-semibold text-[11px]">${d.date}</span>
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-300 line-through text-[11px]">${d.before.workout_type.toUpperCase()} · ${d.before.metric_primary}${d.before.metric_unit}</span>
+                  <span class="text-slate-500">→</span>
+                  <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold text-[11px]">${d.after.workout_type.toUpperCase()} · ${d.after.metric_primary}${d.after.metric_unit}</span>
+                </div>
+                ${d.after.intensity_detail ? `<span class="text-[10px] text-slate-400 italic">${d.after.intensity_detail}</span>` : ''}
+              </div>
+            `;
+          });
+          reply += `</div>`;
+        }
+
+        chat.innerHTML += `<div class="bg-slate-800 rounded-2xl rounded-tl-sm p-3 max-w-[92%] text-slate-200 text-sm border border-slate-700">${reply}</div>`;
+        chat.scrollTop = chat.scrollHeight;
+
+        await loadState();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    // Modal controls: Onboarding / Neues Ziel
     function openOnboardModal() { document.getElementById('onboard-modal').classList.remove('hidden'); }
     function closeOnboardModal() { document.getElementById('onboard-modal').classList.add('hidden'); }
 
