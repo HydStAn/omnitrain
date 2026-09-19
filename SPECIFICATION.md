@@ -11,9 +11,10 @@ Die Benutzeroberfläche (Flutter) wird später aufgesetzt. Dieses Repository imp
    - Das LLM berechnet keine Trainingskurven oder mathematische Progressionen.
    - Das LLM dient ausschließlich als Semantic Extraction & Classification Layer (Übersetzung von Freitext in normiertes JSON).
    - Die Rechen- und Periodisierungslogik ist über ein **Sport Engine Interface (Strategy Pattern)** entkoppelt:
-     - `RunningStrategy`: Daniels VDOT, Pfitzinger Mileage, km-basierte Progression und Longrun-Deckelung.
-     - `CyclingStrategy` *(zukünftig)*: Coggan FTP/TSS, Power Zones (Z1–Z7), Watt-/Zeit-Regeln.
-     - `StrengthStrategy` *(zukünftig)*: RIR/RPE-Laststeuerung, Satz-/Wdh-Volumen, Deloads.
+      - `RunningStrategy`: Daniels VDOT, Pfitzinger Mileage, km-basierte Progression, Strides und Longrun-Deckelung.
+      - `CyclingStrategy` *(zukünftig)*: Coggan FTP/TSS (mit definierten Testprotokollen), NP/IF, Power Zones (Z1–Z7), CTL/ATL/TSB, Sweetspot & Polarized.
+      - `StrengthStrategy` *(zukünftig)*: RIR/RPE-Laststeuerung, DUP/Linear/Block-Periodisierung, Movement-Pattern-Balancing, MEV/MAV/MRV.
+      - `SwimStrategy` *(zukünftig)*: CSS mit definiertem Testprotokoll, 5-Zonen-Modell, Pull/Kick/Technik-Komponenten, SWOLF-Tracking.
 2. **Offline-First & Local-Only:** 
    - Konzipiert für lokale 1.5B–3B Modelle (z. B. Qwen 2.5 3B, Llama 3.2 3B via Ollama / llama.cpp / GGUF).
    - Alle LLM-Antworten werden über strikte JSON-Schemas (JSON-Mode / Structured Outputs) validiert.
@@ -42,18 +43,31 @@ Die Benutzeroberfläche (Flutter) wird später aufgesetzt. Dieses Repository imp
              │                               │
              ▼                               ▼
 ┌──────────────────────────┐    ┌─────────────────────────┐
-│ RunningStrategy          │    │ CyclingStrategy / ...   │
+│ RunningStrategy          │    │ CyclingStrategy         │
 │ - Daniels VDOT-Zonen     │    │ - Coggan FTP-Zonen      │
-│ - Pfitzinger Mileage     │    │ - Power Zones (Z1-Z7)   │
-│ - Km-basierte Progression│    │ - Watt-/Zeit-Regeln     │
-│ - Pace-Zonen-Berechnung  │    │ - TSS-Berechnung        │
+│ - Pfitzinger Mileage     │    │ - NP/IF/TSS             │
+│ - Strides & Progression  │    │ - Sweetspot & Polarized │
+│ - Pace-Zonen-Berechnung  │    │ - CTL/ATL/TSB           │
+└──────────────────────────┘    └─────────────────────────┘
+┌──────────────────────────┐    ┌─────────────────────────┐
+│ StrengthStrategy         │    │ SwimStrategy            │
+│ - RPE/RIR Autoregulation │    │ - CSS-Zonen (5 Stufen)  │
+│ - DUP/Linear/Block       │    │ - Pull/Kick/Technik     │
+│ - Movement Patterns      │    │ - SWOLF-Tracking        │
+│ - MEV/MAV/MRV            │    │ - Open-Water-Spezifika  │
 └──────────────────────────┘    └─────────────────────────┘
              │                               │
              └───────────────┬───────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────┐
-│ 3. Generisches SQLite Schema                            │
+│ 3. Unified Training Load (rTSS + bTSS + sTSS + wTSS)  │
+│    → CTL / ATL / TSB über alle Sportarten              │
+└────────────────────────────┬────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│ 4. Generisches SQLite Schema                            │
 │    (Users, Plans, Weeks, Workouts, Checkin-Logs,        │
 │     Training-Zones, Mutationen)                         │
 └─────────────────────────────────────────────────────────┘
@@ -276,6 +290,17 @@ Die `RunningStrategy` berechnet Pace-Zonen nach Daniels' VDOT-Tabelle aus dem Us
   * Tag 2 (Do): Tempo / Schwellenlauf (20 % Wochenumfang) → Zone T
   * Tag 3 (Sa): Easy Run (25 % Wochenumfang) → Zone E
   * Tag 4 (So): Longrun (35 % Wochenumfang, maximal 32–34 km) → Zone E/M
+* **Strides (Lauf-ABC / neuromuskuläre Aktivierung):**
+  * 4–6 × 80–100 m kontrollierte Beschleunigungen (Zone R), am Ende von Easy Runs (Tag 1 oder Tag 3).
+  * Kein eigenes Volumen — zählen nicht zum Wochenumfang, aber als Workout-Komponente in `structure_json` abgebildet.
+  * Zweck: Laufökonomie, Rekrutierung schneller Muskelfasern, Erhalt der Spritzigkeit ohne Ermüdungsrisiko.
+  * Referenz: Daniels (*Running Formula*), Pfitzinger (*Advanced Marathoning*), Fitzgerald (*80/20 Running*).
+* **Adaptive Volumen-Steigerungsrate:**
+  * Die pauschale 8–10 %-Regel (§5B) wird nach aktuellem Wochenvolumen differenziert:
+    * < 30 km/Woche: max. 8 % (Einsteiger, höheres relatives Verletzungsrisiko)
+    * 30–60 km/Woche: 8–10 % (Standard)
+    * \> 60 km/Woche: 5–8 % (erfahrene Läufer, absolute km-Zunahme bereits gross)
+  * Gespeichert als Konfiguration in der `RunningStrategy`, nicht als User-Eingabe.
 
 ### C. Reconcile- & Mutations-Regelwerk (Zustandsautomat)
 
@@ -367,6 +392,17 @@ Das Kernprinzip trennt Daten- und Prompt-Modell von der Rechen-Engine:
    * Pläne und Workouts unterstützen `sport_type`, `metric_primary`, `metric_unit`, `intensity_target` und `intensity_detail`.
    * Detail-Parameter für Nicht-Lauf-Disziplinen werden über flexible JSON-Payloads (`structure_json` / `actual_metrics_json`) abgebildet, ohne das Tabellenschema brechen zu müssen.
    * Multi-Sport-Tage werden durch mehrere Workouts am selben Datum mit unterschiedlichem `sport_type` abgebildet.
+4. **Unified Training Load (sportartübergreifende Belastungssteuerung):**
+   * Jede Strategy berechnet einen sportartspezifischen **Training Stress Score (TSS)** pro Workout:
+     * Laufen: **rTSS** (basierend auf Pace / Functional Threshold Pace)
+     * Radsport: **bTSS** (basierend auf NP / FTP, nach Coggan)
+     * Schwimmen: **sTSS** (basierend auf Pace / CSS)
+     * Kraft: **wTSS** (Approximation aus RPE × Dauer)
+   * Der Gesamt-TSS pro Tag/Woche wird über alle Sportarten aggregiert und ermöglicht die Berechnung von **CTL** (Chronic Training Load), **ATL** (Acute Training Load) und **TSB** (Training Stress Balance) als zentrale Steuerungsgrössen.
+   * Diese Metriken werden in `actual_metrics_json` erfasst und in der Statistik-Ansicht visualisiert.
+5. **Konfigurierbarer Mesozyklus:**
+   * Standard: 3:1 (3 Wochen Steigerung, 1 Woche Entlastung).
+   * Konfigurierbar in `plans.profile_json` als `{"mesocycle_ratio": "3:1"}` — unterstützte Varianten: `2:1` (ältere/verletzungsanfällige Athleten), `3:1` (Standard), `4:1` (junge/erfahrene Athleten mit hoher Belastbarkeit).
 
 ## 9. Sportarten- & Zielkatalog (Referenz)
 
@@ -398,6 +434,31 @@ Besonderheiten Ultra: Longrun-Cap in Zeit statt km (z. B. max. 4h statt max. 34 
 
 Besonderheiten: Sweetspot-Blöcke (88–94 % FTP), Over-Under-Intervalle, Periodisierung nach CTL/ATL/TSB, Indoor/Outdoor-Differenzierung.
 
+#### FTP-Testprotokolle (Pflicht vor Zonenberechnung)
+FTP (Functional Threshold Power) muss vor der Zonenberechnung bestimmt werden. Es werden zwei Standard-Protokolle unterstützt:
+* **20-Minuten-Test:** 20 min All-Out auf Ergometer/Strasse. FTP = Durchschnittsleistung × 0.95.
+* **Ramp-Test (Step-Test):** Beginnend bei ~100 W, alle 1 min +20 W bis Erschöpfung. FTP = 75 % der letzten voll absolvierten Stufe.
+* **Ergebnis:** Wird in `training_zones.reference_value` persistiert; Zonen werden automatisch berechnet.
+* **Re-Test-Empfehlung:** Alle 6–8 Wochen oder nach signifikantem Trainingsblock / Wettkampf.
+* **Indoor/Outdoor-Korrektur:** Indoor-FTP liegt typisch 5–10 % unter Outdoor-FTP. Bei Bedarf zwei separate Zonenprofile.
+
+#### Normalized Power (NP), Intensity Factor (IF) \u0026 TSS-Berechnung
+* **Normalized Power (NP):** Gewichteter Durchschnitt der Leistung, der variable Intensität berücksichtigt (30-s rolling average, 4. Potenz). Besser als Durchschnittsleistung für ungleichmässige Belastungen.
+* **Intensity Factor (IF):** `IF = NP / FTP`. Werte: <0.75 = Recovery, 0.75–0.85 = Endurance, 0.85–0.95 = Tempo, 0.95–1.05 = Threshold, >1.05 = VO2max+.
+* **TSS-Formel:** `TSS = (Dauer_in_Sekunden × NP × IF) / (FTP × 3600) × 100`.
+* **Abbildung in DB:** NP und IF werden in `actual_metrics_json` erfasst: `{"np_watts": 210, "if": 0.91, "tss": 85}`.
+
+#### CTL-Steigerungsrate (Safety Constraint)
+Analog zur 10 %-Regel im Laufsport gilt für die Rad-Periodisierung:
+* **Maximale CTL-Steigerung:** 5–7 TSS/Tag pro Woche (Empfehlung nach Coggan/Allen).
+* **Überschreitung:** Löst bei der Plan-Generierung eine Warnung aus und begrenzt automatisch das geplante Wochenvolumen.
+
+#### Polarized Training (Seiler-Modell, alternative Plan-Variante)
+* Neben dem Sweetspot-basierten Default-Ansatz wird **Polarized Training** nach Stephen Seiler als konfigurierbare Variante unterstützt.
+* **Verteilung:** ~80 % des Trainingsvolumens in Z1–Z2 (unter LT1), ~20 % in Z4+ (über LT2), minimale Zeit in Z3 (Sweetspot/Tempo).
+* **Evidenz:** Meta-Analysen (Stöggl \u0026 Sperlich, 2014) zeigen bei erfahrenen Ausdauerathleten vergleichbare oder bessere Ergebnisse als Threshold-Training.
+* **Konfiguration:** Über `plans.profile_json` als `{"training_distribution": "polarized"}` (Default: `"sweetspot"`).
+
 ### 🏋️ Kraftsport (`StrengthStrategy`)
 
 | Ziel (`goal_type`) | Planstruktur | Primärmetrik | Intensitätsmodell |
@@ -411,6 +472,48 @@ Besonderheiten: Sweetspot-Blöcke (88–94 % FTP), Over-Under-Intervalle, Period
 
 Besonderheiten: Deload-Wochen alle 3–4 Wochen (-40 % Volumen), Übungslisten in `structure_json`, Split-Varianten (Push/Pull/Legs, Upper/Lower, Ganzkörper), Autoregulation via RPE/RIR.
 
+#### Periodisierungsmodell
+Die `StrengthStrategy` verwendet standardmässig **Daily Undulating Periodization (DUP)** (Zourdos et al., 2016) — die aktuell best-evidenzierte Methode für simultane Kraft- und Hypertrophie-Entwicklung:
+* **Prinzip:** Innerhalb einer Woche variieren Intensität und Volumen pro Trainingstag (z. B. Mo: Hypertrophie 3×10 @RPE 7, Mi: Kraft 5×3 @RPE 8, Fr: Power/Metabolic 4×6 @RPE 7.5).
+* **Alternative Modelle** (über `plans.profile_json` konfigurierbar):
+  * **Linear:** Klassische Phasen — Hypertrophie (4 Wo) → Kraft (4 Wo) → Peaking (2 Wo). Besser für Einsteiger.
+  * **Block:** Issurin-Modell — konzentrierte Blöcke (2–4 Wochen) mit einem Hauptfokus. Gut für fortgeschrittene Powerlifter.
+* **Default für Goal-Typen:**
+  * `hypertrophy` / `general_fitness` / `bodyweight_fitness` → DUP
+  * `strength_5x5` / `rehab_strength` → Linear
+  * `powerlifting_meet` → Block (mit Peaking)
+
+#### Wiederholungsbereiche pro Ziel
+| Ziel | Rep-Range | Sätze | Intensität | Pause |
+|------|-----------|-------|-----------|-------|
+| Maximalkraft | 1–5 Wdh | 3–6 | 85–100 % 1RM / RPE 8–10 | 3–5 min |
+| Hypertrophie | 6–12 Wdh | 3–5 | 65–80 % 1RM / RPE 7–9 | 60–120 s |
+| Kraft-Ausdauer | 12–20 Wdh | 2–4 | 50–65 % 1RM / RPE 6–8 | 30–60 s |
+| Metabolic / Power | 3–6 Wdh (explosiv) | 3–5 | 50–70 % 1RM | 2–3 min |
+
+Diese Bereiche werden in `structure_json` als Constraints pro Übung hinterlegt und für die Autoregulation via RPE/RIR herangezogen.
+
+#### Übungs-Kategorisierung (Movement Patterns)
+Compound-Übungen werden nach Bewegungsmuster klassifiziert, um ein automatisches Balancing der Split-Pläne zu ermöglichen:
+* **Squat** (Kniebeuge-Pattern): Back Squat, Front Squat, Goblet Squat, Split Squat
+* **Hinge** (Hüftgelenk-Pattern): Deadlift, Romanian DL, Hip Thrust, Good Morning
+* **Vertical Push:** Overhead Press, Push Press, Dumbbell Shoulder Press
+* **Vertical Pull:** Pull-Up, Chin-Up, Lat Pulldown
+* **Horizontal Push:** Bench Press, Incline Press, Push-Up
+* **Horizontal Pull:** Barbell Row, Cable Row, Dumbbell Row
+* **Carry / Core:** Farmer's Walk, Plank, Pallof Press, Turkish Get-Up
+
+Die Engine stellt sicher, dass jeder Split pro Woche alle 7 Patterns mindestens 1× enthält (ausser `rehab_strength`, wo selektiv gearbeitet wird).
+
+#### Volumen-Landmarken (nach Renaissance Periodization)
+* **MEV (Minimum Effective Volume):** Minimales Satzvolumen pro Muskelgruppe und Woche, um Fortschritt zu erzielen (typisch 6–10 Sätze).
+* **MAV (Maximum Adaptive Volume):** Optimaler Bereich für maximale Adaptation (typisch 12–20 Sätze).
+* **MRV (Maximum Recoverable Volume):** Obergrenze, ab der die Erholung nicht mehr ausreicht (typisch 20–25+ Sätze).
+* Die Engine generiert Pläne im MAV-Bereich und reduziert auf MEV in Deload-Wochen.
+
+#### Relative Stärke-Koeffizienten
+Für Powerlifting-Vergleiche werden **DOTS Points** (IPF-Standard, Nachfolger von Wilks) und optional **GL Points** (Goodlift) unterstützt. Wilks bleibt als Legacy-Option verfügbar.
+
 ### 🏊 Schwimmen (`SwimStrategy`)
 
 | Ziel (`goal_type`) | Planstruktur | Primärmetrik | Zonenmodell |
@@ -421,6 +524,41 @@ Besonderheiten: Deload-Wochen alle 3–4 Wochen (-40 % Volumen), Übungslisten i
 | `learn_to_swim` | Fortlaufend | Minuten + Technikdrills | RPE |
 
 Besonderheiten: Technikdrills als eigenständiger Workout-Typ, Zugfrequenz-Metriken, Intervalle in Bahnen (25m/50m).
+
+#### CSS-Testprotokoll (Pflicht vor Zonenberechnung)
+Die CSS wird aus zwei Zeitschwimm-Tests berechnet:
+* **Testset:** 400 m Zeitschwimmen (t₄₀₀) + 5 min Pause + 200 m Zeitschwimmen (t₂₀₀), jeweils All-Out.
+* **Formel:** `CSS = (400 − 200) / (t₄₀₀ − t₂₀₀)` → Ergebnis in m/s, umgerechnet in Pace pro 100 m.
+* **Beispiel:** t₄₀₀ = 6:30 (390s), t₂₀₀ = 3:00 (180s) → CSS = 200 / 210 = 0.952 m/s → **1:45 min/100m**.
+* **Re-Test-Empfehlung:** Alle 6–8 Wochen oder nach signifikantem Trainingsblock.
+
+#### CSS-Zonenmodell
+| Zone | Name | Pace (relativ zu CSS) | Einsatz |
+|------|------|----------------------|---------|
+| Z1 | Recovery | CSS + 15–20 s/100m | Aktive Erholung, Technikfokus |
+| Z2 | Endurance | CSS + 5–10 s/100m | Aerobe Grundlage, hohe Umfänge |
+| Z3 | Threshold (CSS) | CSS ± 3 s/100m | Schwellenarbeit, Haupttraining |
+| Z4 | VO2max | CSS − 5–10 s/100m | Kurze Intervalle (100–200 m) |
+| Z5 | Sprint | CSS − 15+ s/100m | Maximalsprints (25–50 m) |
+
+#### Trainingskomponenten (Workout-Typen)
+Schwimmtraining besteht aus mehr als reinem Kraul-Schwimmen. Folgende Workout-Typen werden als eigenständige Einheiten oder Blöcke innerhalb eines Workouts unterstützt:
+* **Main Set:** Normales Schwimmen (Freestyle), Intervalle nach CSS-Zonen.
+* **Pull-Set:** Mit Pullbuoy (Oberkörper-Fokus, Beinauftrieb eliminiert). Typisch 20–30 % des Trainingsumfangs.
+* **Kick-Set:** Mit Schwimmbrett (Beinarbeit isoliert). Typisch 10–15 % des Trainingsumfangs.
+* **Paddles-Set:** Mit Handpaddles (Kraftentwicklung Oberkörper). Erst ab fortgeschrittenem Niveau, max. 20 % des Umfangs.
+* **Technik-Drills:** Einarmig, Catch-Up, Fingertip-Drag, Sculling etc. Als strukturierte Liste in `structure_json`.
+* **Abbildung in DB:** Über `structure_json`, z. B. `{"blocks": [{"type": "warmup", "meters": 400, "zone": "Z1"}, {"type": "pull", "meters": 600, "zone": "Z2"}, {"type": "main", "intervals": [{"reps": 8, "meters": 100, "zone": "Z4", "rest_sec": 20}]}, {"type": "kick", "meters": 200, "zone": "Z2"}]}`.
+
+#### Effizienzmetrik SWOLF
+* **Definition:** SWOLF = Zuganzahl + Zeit (in Sekunden) pro Bahn. Niedrigerer Wert = effizienter.
+* **Tracking:** Als optionale Metrik in `actual_metrics_json` erfassbar: `{"swolf": 38, "stroke_count": 14, "time_per_25m": 24}`.
+* **Verwendung:** Langzeit-Trendanalyse der Schwimmeffizienz, kein Steuerungs-Input für die Engine.
+
+#### Open-Water-Spezifika (für `open_water_5k` / Triathlon-Schwimmen)
+* **Sighting-Drills:** Periodisch in Main-Sets integriert (alle 6–8 Züge Kopf heben).
+* **Drafting-Übungen:** Schwimmen im Windschatten als spezifischer Trainingsinhalt.
+* **Neoprenanzug-Einfluss:** CSS im Neopren typisch 3–5 s/100m schneller — separate Zonen-Berechnung bei Bedarf.
 
 ### 🏆 Multi-Sport / Hybrid
 
@@ -436,6 +574,25 @@ Besonderheiten: Technikdrills als eigenständiger Workout-Typ, Zugfrequenz-Metri
 | `swimrun` | Swim + Run | 12–20 Wochen |
 
 Multi-Sport-Tage werden in der DB als mehrere Workouts am selben `date` mit unterschiedlichem `sport_type` abgebildet.
+
+#### Cross-Sport-Belastungsäquivalenz (Unified Training Load)
+Für die korrekte Steuerung kumulierter Ermüdung über Sportarten hinweg wird eine einheitliche Belastungswährung benötigt:
+* **rTSS (Run Training Stress Score):** Berechnet aus Pace-zu-FTP-Ratio (oder HR-basiert bei fehlendem Pace-Sensor). Formel analog Cycling-TSS, wobei Functional Threshold Pace (FTPa) die Referenz bildet.
+* **sTSS (Swim Training Stress Score):** Berechnet aus CSS-Ratio — `sTSS = (Dauer × (NP / CSS)² × 100) / 3600`.
+* **bTSS (Bike Training Stress Score):** Identisch mit Coggan-TSS (siehe CyclingStrategy).
+* **Gesamt-TSS:** Summe aus rTSS + sTSS + bTSS pro Tag/Woche. Ermöglicht CTL/ATL/TSB-Berechnung über alle Disziplinen.
+* **Wöchentliche TSS-Caps:** Empfohlen nach Trainingsstatus (z. B. Sprint-Tri: 300–500 TSS/Woche, Ironman: 700–1200 TSS/Woche).
+
+#### Sportarten-Priorisierung (Limiter-Konzept)
+Nach Joe Friels *The Triathlete's Training Bible* wird die Disziplin identifiziert, die den grössten Performance-Engpass darstellt:
+* **Onboarding-Frage:** „Welche Disziplin ist dein Limiter?" (oder Ableitung aus Benchmark-Zeiten).
+* **Einfluss auf Volumenverteilung:** Der Limiter erhält proportional mehr Trainingsvolumen (z. B. 40 % Limiter, 35 % Stärke, 25 % dritte Disziplin).
+* **Gespeichert in:** `plans.profile_json` als `{"limiter": "swim", "strength": "bike", "volume_split": [40, 35, 25]}`.
+
+#### Transition-Training (T1 / T2)
+* **T1 (Swim → Bike)** und **T2 (Bike → Run)** werden als eigenständige Workout-Komponenten in `structure_json` abgebildet.
+* **Brick Workouts** enthalten T2-Blöcke: `{"brick": [{"sport": "cycling", "duration_min": 60, "zone": "Z3"}, {"transition": "T2", "target_min": 3}, {"sport": "running", "duration_min": 20, "zone": "E"}]}`.
+* **Transition-Praxis:** Ab 8 Wochen vor dem Wettkampf mindestens 1× pro Woche ein Brick-Workout.
 
 ### 🧘 Ergänzende / Randkategorien
 
