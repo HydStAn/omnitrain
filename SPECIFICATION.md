@@ -19,7 +19,10 @@ Die Benutzeroberfläche (Flutter) wird später aufgesetzt. Dieses Repository imp
    - Konzipiert für lokale 1.5B–3B Modelle (z. B. Qwen 2.5 3B, Llama 3.2 3B via Ollama / llama.cpp / GGUF).
    - Alle LLM-Antworten werden über strikte JSON-Schemas (JSON-Mode / Structured Outputs) validiert.
    - **LLM-Fallback-Strategie:** Wenn das lokale LLM nicht erreichbar ist (Ollama nicht gestartet, Modell nicht geladen), fällt das System auf strukturierte CLI-Prompts zurück (direkte Abfrage der einzelnen Felder statt Freitext-Parsing). Timeout: 5 Sekunden, max. 2 Retries.
-3. **Sportwissenschaftliche Sicherheitsregeln:**
+3. **Wearables & Automatisierte Ingestion (API-Adapter):**
+   - Das System bereitet eine Adapter-Schnittstelle (Service Layer) für zukünftige Integrationen von Apple HealthKit, Garmin Connect oder Strava vor.
+   - Harte Metriken (HR, Pace, Watt, HRV) sollen perspektivisch automatisch ingestiert werden. Der LLM-gestützte Freitext-Check-in ergänzt dann primär weiche Metriken (RPE, Schmerz, Ernährung, Gefühl).
+4. **Sportwissenschaftliche Sicherheitsregeln:**
    - Verpasste Einheiten/Volumina werden niemals auf Folgetage aufgeschlagen.
    - Übererfüllung führt nicht zur automatischen Steigerung der Folgetage (Überlastungsschutz).
    - Gelenk-/Sehnenschmerz oder Krankheit erzwingen softwareseitig Ruhe- oder Entlastungstage.
@@ -94,7 +97,7 @@ schema_version:
   * resting_hr (INTEGER, nullable, Ruhepuls in bpm)
   * max_hr (INTEGER, nullable, Maximalpuls in bpm)
   * weight_kg (REAL, nullable)
-  * profile_json (TEXT, nullable — erweiterbare Stammdaten, z. B. `{"vdot": 42, "ftp_watts": 220, "swim_css_100m": "01:48", "track_menstrual_cycle": true}`)
+  * profile_json (TEXT, nullable — erweiterbare Stammdaten, z. B. `{"vdot": 42, "ftp_watts": 220, "swim_css_100m": "01:48", "track_menstrual_cycle": true, "injury_history": []}`)
   * created_at (TEXT / ISO8601)
   * updated_at (TEXT / ISO8601)
 
@@ -149,7 +152,7 @@ schema_version:
   * intensity_detail (TEXT, nullable — berechnete Zielwerte, z. B. '05:30–05:50 min/km', '200–220 W')
   * target_duration_min (INTEGER, nullable)
   * structure_json (TEXT, nullable — Intervall-Sets, Übungslisten, z. B. `{"intervals": [{"reps": 6, "distance_m": 800, "zone": "interval"}]}`)
-  * status (TEXT: 'planned', 'completed', 'partial', 'skipped', 'modified')
+  * status (TEXT: 'planned', 'completed', 'partial', 'skipped', 'medical_skip', 'modified')
   * created_at (TEXT / ISO8601)
   * updated_at (TEXT / ISO8601)
 
@@ -161,6 +164,7 @@ schema_version:
   * raw_input (TEXT)
   * completion_status (TEXT: 'completed', 'partial', 'skipped', 'sick')
   * actual_metrics_json (TEXT, nullable, z. B. `{"metric_primary": 12.0, "unit": "km"}`)
+  * environmental_factors_json (TEXT, nullable — Wetter, Hitze, Höhe, z. B. `{"temp_c": 30, "elevation_m": 1500}`)
   * perceived_rpe (INTEGER, 1..10, nullable)
   * symptoms_json (TEXT)
   * applied_mutations_json (TEXT — inkl. Timestamps: `[{"rule": "pain_rest_48h", "affected_workouts": [...], "applied_at": "..."}]`)
@@ -298,11 +302,12 @@ Die `RunningStrategy` berechnet Pace-Zonen nach Daniels' VDOT-Tabelle aus dem Us
   * Kein eigenes Volumen — zählen nicht zum Wochenumfang, aber als Workout-Komponente in `structure_json` abgebildet.
   * Zweck: Laufökonomie, Rekrutierung schneller Muskelfasern, Erhalt der Spritzigkeit ohne Ermüdungsrisiko.
   * Referenz: Daniels (*Running Formula*), Pfitzinger (*Advanced Marathoning*), Fitzgerald (*80/20 Running*).
-* **Adaptive Volumen-Steigerungsrate:**
+* **Adaptive Volumen-Steigerungsrate & Alters-Skalierung:**
   * Die pauschale 8–10 %-Regel (§5B) wird nach aktuellem Wochenvolumen differenziert:
     * < 30 km/Woche: max. 8 % (Einsteiger, höheres relatives Verletzungsrisiko)
     * 30–60 km/Woche: 8–10 % (Standard)
     * \> 60 km/Woche: 5–8 % (erfahrene Läufer, absolute km-Zunahme bereits gross)
+  * **Alters-Anpassung:** Bei Athleten > 40 Jahre (und verstärkt ab > 50) wird die Steigerungsrate und das Basis-Wochenvolumen konservativer skaliert, da Sehnen und Muskeln signifikant mehr Zeit für die Regeneration benötigen.
   * Gespeichert als Konfiguration in der `RunningStrategy`, nicht als User-Eingabe.
 
 ### C. Reconcile- & Mutations-Regelwerk (Zustandsautomat)
@@ -323,34 +328,45 @@ Bei mehreren gleichzeitigen Signalen (z. B. `SICK` + `PAIN`) greift die höchstp
 
 #### Regel 1: Status SICK
 * **Auslöser:** Check-in mit `sickness_reported = true` oder `completion_status = 'sick'`.
-* **Aktion:** Alle geplanten Workouts werden in `rest` umgewandelt, **bis ein expliziter Status-Update (`event_type: 'status_update'`, `update_type: 'recovery'`, `status: 'resolved'`) eingeht.**
-* **Wiedereinstieg nach Genesung:**
-  * Erstes Training bei maximal 50 % des geplanten Volumens.
+* **Klassifizierung (LLM-Aufgabe):** Unterscheidung zwischen systemisch ("Fieber", "Gliederschmerzen", "below the neck") und lokal ("Schnupfen", "above the neck").
+* **Aktion:**
+  * Bei systemischem Infekt: Alle geplanten Workouts werden zwingend in `rest` umgewandelt, **bis ein expliziter Status-Update (`status: 'resolved'`) eingeht.**
+  * Bei lokalem Infekt ohne Fieber: Option auf leichte Aktivität (Zone 1) zur Erhaltung, kein Tempotraining.
+* **Wiedereinstieg nach systemischer Genesung:**
+  * Erstes Training bei maximal 50 % des geplanten Volumens, zwingend Zone 1.
   * Kein Tempotraining (`tempo`, `interval`) in den ersten 4 Tagen nach Genesung.
   * Ab Tag 5: schrittweise Rückkehr zum regulären Plan.
 
 #### Regel 2: Symptom PAIN (Gelenk, Sehne, Fuß, Schienbein)
 * **Auslöser:** Check-in mit `symptoms[].type` in `['joint_pain', 'tendon_pain', 'shin_pain', 'bone_pain']`.
-* **Aktion:**
-  * **Severity >= 4 (Echter Schmerz):** Mindestens 48–72 Stunden zwingende Trainingspause (Umwandlung in `rest`). Streichung von Tempo-/Intervalltraining für die laufende Woche. Bei `severity >= 7`: Pause bis expliziter Status-Update (`pain_update`, `status: 'resolved'`).
-  * **Severity 1-3 (Niggle):** Löst *keine* Trainingspause aus. Wird im UI als "Niggle" zur Beobachtung markiert. Die Engine ersetzt jedoch Tempo-Einheiten in den nächsten 48h durch Easy-Einheiten.
-* **Muskelschmerz (`type: 'muscle_soreness'`)** mit `severity < 6` löst keine Zwangspause aus (normaler Trainingsreiz).
+* **Aktion je nach Schmerzart & Lokalisierung:**
+  * **Knochenschmerz (z. B. shin_pain):** Strikte Entlastung. Bei Severity >= 4 sofortige Zwangspause bis explizites ärztliches "Go" (Status-Update).
+  * **Sehnenschmerz (z. B. tendon_pain, Achillessehne):** Reagiert oft schlecht auf komplette Ruhe. Volumen/Intensität wird drastisch reduziert, Plyometrie/Sprints gestrichen, aber leichtes Lastmanagement bleibt erhalten.
+  * **Gelenkschmerz (z. B. joint_pain, Knie):** Severity >= 4 erzwingt 48–72h Pause. Bei Severity 1-3 (Niggle) keine Pause, aber Ersatz von Tempo durch Easy in den nächsten 48h.
+* **Muskelschmerz (`type: 'muscle_soreness'`)** mit `severity < 6` löst keine Zwangspause aus (Active Recovery).
+* **LLM Human-in-the-Loop:** Bei Erkennung von Schmerz ab Severity 4 fragt die UI sicherheitshalber nach ("Ich habe verstanden: Stechender Knieschmerz (6/10). Korrekt?").
 
 #### Regel 3: FATIGUE / LOW READINESS
 * **Auslöser:** Status-Update `readiness_update` (z.B. Jetlag, Schlafmangel, extrem gestresst) mit `severity >= 7`.
 * **Aktion:** Nächste 48 Stunden: Umwandlung aller High-Intensity-Workouts (Tempo, Intervalle, Kraft Maximalkraft) in Active Recovery / Easy Workouts (Zone 1-2). Volumen bleibt erhalten, Intensität sinkt.
 
-#### Regel 4: RPE-Überwachung
+#### Regel 4: Ernährung & Hydration (RED-S Prävention)
+* **Auslöser:** Geplante Long Runs (>90 min) oder extreme TSS-Wochen.
+* **Aktion:** Die Engine gibt proaktive Warnungen oder Tipps für die Kohlenhydratzufuhr (g/h) und Hydratation aus.
+* **Check-in Kontext:** Fehlende Verpflegung kann als Kontext für hohe RPE-Ausreißer ("Bonking") erfasst werden, um zu verhindern, dass die Engine mangelnde Fitness annimmt, wenn es an Treibstoff fehlte.
+
+#### Regel 5: RPE-Überwachung
 * **Auslöser:** Easy-Workout mit `perceived_rpe >= 8`.
 * **Aktion:** Reduktion des Volumens der Folgewoche um 15 %.
-* **Ausnahme (Female Cycle):** Wenn `track_menstrual_cycle: true` und der User sich in der späten Luteal- / frühen Menstruationsphase befindet (häufig höherer RPE/Puls), wird die RPE-Toleranz um +1 erhöht, bevor das Volumen reduziert wird.
+* **Ausnahme (Female Cycle):** Wenn `track_menstrual_cycle: true` und der User sich in der späten Luteal- / frühen Menstruationsphase befindet (häufig höherer RPE/Puls), wird die RPE-Toleranz um +1 erhöht.
+  * *Proaktive Anpassung:* Statt nur reaktiv die RPE-Toleranz zu erhöhen, reduziert die Engine in dieser Zyklusphase proaktiv die Intensität leicht und passt Temperatur- oder Pulszonen nach oben an, um der veränderten Physiologie (Körperkerntemperatur, Substratnutzung) gerecht zu werden.
 
-#### Regel 5: PARTIAL / MISSED
+#### Regel 6: PARTIAL / MISSED
 * **Partial - Time Constraint:** Abbruch wegen Zeitmangel. Keine Aktion, verpasstes Volumen verfällt ersatzlos.
 * **Partial - Exhaustion:** Abbruch wegen Erschöpfung. Zählt als `RPE_HIGH` (Regel 4) und senkt das Volumen der Folgewoche.
 * **Missed:** Verpasste Einheiten verfallen. Kein Erhöhen der Folgetage oder des nächsten Longruns (Schutz vor "Aufhol-Verletzungen").
 
-#### Regel 6: OVERPERFORMED
+#### Regel 7: OVERPERFORMED
 * Keine automatische Steigerung der Folgetage; Plan läuft unverändert weiter.
 
 ### D. Replan-Konzept (Plan-Neugenerierung)
@@ -358,6 +374,7 @@ Punktuelle Mutationen (§5C) reichen nicht aus, wenn der Plan strukturell ungül
 * **Langzeitausfall:** Mehr als 2 zusammenhängende Wochen ohne Training (Krankheit, Verletzung). Der Restplan wird ab der aktuellen Woche mit reduziertem Basisvolumen neu generiert.
 * **Zieländerung:** Neues Zieldatum (`goal_change` Status-Update), andere Zieldistanz, anderer Wettkampf.
 * **Signifikante Fitness-Änderung:** Neuer VDOT/FTP nach Wettkampf oder Leistungstest → Zonen und Paces werden neu berechnet, offene Workouts erhalten aktualisierte `intensity_detail`-Werte.
+* **Goal Feasibility Check:** Fällt ein Athlet so lange aus, dass die verbleibende Zeit bis zum Wettkampf nicht mehr ausreicht, um das nötige Volumen sicher zu erreichen, eskaliert die Engine den Replan. Sie schlägt proaktiv ein Downgrade des Ziels (z. B. Halbmarathon statt Marathon) oder ein neues Zieldatum vor.
 
 Beim Replan gilt:
 * Bereits absolvierte Wochen/Workouts bleiben unverändert (`status != 'planned'`).
@@ -589,7 +606,9 @@ Für die korrekte Steuerung kumulierter Ermüdung über Sportarten hinweg wird e
 * **rTSS (Run Training Stress Score):** Berechnet aus Pace-zu-FTP-Ratio (oder HR-basiert bei fehlendem Pace-Sensor). Formel analog Cycling-TSS, wobei Functional Threshold Pace (FTPa) die Referenz bildet.
 * **sTSS (Swim Training Stress Score):** Berechnet aus CSS-Ratio — `sTSS = (Dauer × (NP / CSS)² × 100) / 3600`.
 * **bTSS (Bike Training Stress Score):** Identisch mit Coggan-TSS (siehe CyclingStrategy).
-* **Gesamt-TSS:** Summe aus rTSS + sTSS + bTSS pro Tag/Woche. Ermöglicht CTL/ATL/TSB-Berechnung über alle Disziplinen.
+* **Gesamt-TSS (Kardiovaskulär vs. Strukturell):** Einfaches Aufsummieren reicht im Multi-Sport nicht, da Laufen hohe strukturelle/mechanische Ermüdung erzeugt, Rad/Schwimmen fast keine. Die Engine berechnet zwei getrennte Belastungsvektoren:
+  1. *Metabolischer/Kardiovaskulärer Stress* (CTL auf Basis aller TSS)
+  2. *Struktureller/Orthopädischer Load* (Stark gewichtet auf Lauf-km und Krafttraining)
 * **Wöchentliche TSS-Caps:** Empfohlen nach Trainingsstatus (z. B. Sprint-Tri: 300–500 TSS/Woche, Ironman: 700–1200 TSS/Woche).
 
 #### Sportarten-Priorisierung (Limiter-Konzept)
