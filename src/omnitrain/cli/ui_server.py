@@ -605,42 +605,42 @@ def index():
     .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
   </style>
 </head>
-<body class="min-h-screen font-sans flex justify-center py-6 px-4 pb-28">
-  <div class="w-full max-w-xl flex flex-col gap-6">
+<body class="min-h-screen font-sans flex justify-center py-4 sm:py-6 px-2.5 sm:px-4 pb-28 overflow-x-hidden w-full">
+  <div class="w-full max-w-xl flex flex-col gap-5 sm:gap-6 min-w-0">
 
     <!-- Top Navigation / Status Header -->
-    <header class="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800/80 pb-4 gap-3">
-      <div>
+    <header class="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800/80 pb-3 sm:pb-4 gap-3">
+      <div class="min-w-0">
         <div class="flex items-center gap-2">
-          <span class="w-2.5 h-2.5 rounded-full bg-teal-400 animate-pulse"></span>
-          <h1 class="font-bold text-lg tracking-tight">OmniTrain</h1>
-          <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-mono">v0.1 Blueprint</span>
+          <span class="w-2.5 h-2.5 rounded-full bg-teal-400 animate-pulse shrink-0"></span>
+          <h1 class="font-bold text-lg tracking-tight truncate">OmniTrain</h1>
+          <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-mono shrink-0">v0.1 Blueprint</span>
         </div>
-        <p id="plan-title" class="text-xs text-slate-400 mt-0.5">Lade Trainingsplan...</p>
+        <p id="plan-title" class="text-xs text-slate-400 mt-0.5 truncate">Lade Trainingsplan...</p>
       </div>
-      <div class="flex items-center gap-2">
-        <select id="plan-selector" onchange="onPlanSelect(this.value)" class="text-xs bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-teal-500 font-medium">
+      <div class="flex flex-wrap items-center gap-2">
+        <select id="plan-selector" onchange="onPlanSelect(this.value)" class="text-xs bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-teal-500 font-medium max-w-[140px] sm:max-w-[200px] truncate shrink-0">
           <!-- Dynamically populated -->
         </select>
-        <button onclick="openStatusModal()" class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30 transition flex items-center gap-1.5">
-          <span>🩺</span> Wie geht's dir?
+        <button onclick="openStatusModal()" class="text-xs font-semibold px-2.5 sm:px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30 transition flex items-center gap-1.5 shrink-0">
+          <span>🩺</span> <span class="hidden xs:inline">Wie geht's dir?</span><span class="xs:hidden">Status</span>
         </button>
-        <button onclick="openOnboardModal()" class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white shadow transition">
+        <button onclick="openOnboardModal()" class="text-xs font-semibold px-2.5 sm:px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white shadow transition shrink-0">
           + Ziel
         </button>
       </div>
     </header>
 
     <!-- SICK Mode Banner -->
-    <div id="sick-banner" class="hidden glass-card border-rose-500/40 bg-rose-950/40 rounded-2xl p-4 flex items-center justify-between gap-3 text-rose-200 text-xs">
-      <div class="flex items-center gap-3">
-        <span class="text-2xl">🤒</span>
-        <div>
+    <div id="sick-banner" class="hidden glass-card border-rose-500/40 bg-rose-950/40 rounded-2xl p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-rose-200 text-xs">
+      <div class="flex items-center gap-3 min-w-0">
+        <span class="text-2xl shrink-0">🤒</span>
+        <div class="min-w-0">
           <div class="font-bold text-rose-300 text-sm">Krankheitsmodus aktiv</div>
-          <div class="text-rose-300/80 text-[11px] mt-0.5">Alle Workouts pausiert. Ruhe dich aus und schone deinen Körper.</div>
+          <div class="text-rose-300/80 text-[11px] mt-0.5 break-words">Alle Workouts pausiert. Ruhe dich aus und schone deinen Körper.</div>
         </div>
       </div>
-      <button onclick="submitStatusUpdate('recovery', 'Wieder fit und symptomfrei!')" class="shrink-0 px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-lg transition flex items-center gap-1">
+      <button onclick="submitStatusUpdate('recovery', 'Wieder fit und symptomfrei!')" class="shrink-0 self-start sm:self-auto px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-lg transition flex items-center gap-1">
         <span>🌱</span> Wieder gesund melden
       </button>
     </div>
@@ -667,25 +667,25 @@ def index():
       </div>
 
       <!-- Screen 8: PMC Chart Canvas Section -->
-      <section class="glass-card rounded-2xl p-4 border border-slate-800/80">
-        <div class="flex justify-between items-center mb-3">
+      <section class="glass-card rounded-2xl p-3.5 sm:p-4 border border-slate-800/80">
+        <div class="flex flex-col xs:flex-row justify-between items-start xs:items-center gap-1.5 mb-3">
           <div class="flex items-center gap-2">
-            <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">PMC Trend (Banister Impulse)</span>
+            <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">PMC Trend</span>
             <span class="text-[10px] text-teal-400 font-mono">CTL · ATL · TSB</span>
           </div>
-          <div class="flex items-center gap-3 text-[10px] font-mono">
+          <div class="flex items-center gap-2.5 text-[10px] font-mono">
             <span class="flex items-center gap-1 text-teal-400"><span class="w-2 h-2 rounded-full bg-teal-400 inline-block"></span> CTL</span>
             <span class="flex items-center gap-1 text-purple-400"><span class="w-2 h-2 rounded-full bg-purple-400 inline-block"></span> ATL</span>
             <span class="flex items-center gap-1 text-amber-400"><span class="w-2 h-2 rounded-full bg-amber-400 inline-block"></span> TSB</span>
           </div>
         </div>
-        <div class="h-40 w-full relative">
+        <div class="h-36 sm:h-40 w-full relative">
           <canvas id="pmcChart"></canvas>
         </div>
       </section>
 
       <!-- Screen 1: Heutiges Workout (Hero Card) -->
-      <section class="glass-card rounded-2xl p-5 shadow-2xl relative overflow-hidden border border-teal-500/20">
+      <section class="glass-card rounded-2xl p-4 sm:p-5 shadow-2xl relative overflow-hidden border border-teal-500/20">
         <div class="flex justify-between items-start mb-3">
           <div class="flex items-center gap-2">
             <span id="sport-badge" class="px-2 py-0.5 text-xs font-semibold rounded-md bg-orange-500/20 text-orange-400 border border-orange-500/30 uppercase tracking-wide">
@@ -697,10 +697,10 @@ def index():
         </div>
 
         <div class="my-3">
-          <h2 id="today-workout-title" class="text-2xl font-bold tracking-tight text-white mb-1">Dauerlauf</h2>
-          <div class="flex items-baseline gap-2">
-            <span id="today-metric" class="font-mono text-3xl font-extrabold text-teal-400">-- km</span>
-            <span id="today-intensity" class="text-sm font-mono text-slate-300">Pace: --:-- min/km</span>
+          <h2 id="today-workout-title" class="text-xl sm:text-2xl font-bold tracking-tight text-white mb-1 truncate">Dauerlauf</h2>
+          <div class="flex flex-wrap items-baseline gap-2">
+            <span id="today-metric" class="font-mono text-2xl sm:text-3xl font-extrabold text-teal-400">-- km</span>
+            <span id="today-intensity" class="text-xs sm:text-sm font-mono text-slate-300">Pace: --:-- min/km</span>
           </div>
         </div>
 
@@ -718,25 +718,25 @@ def index():
           <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400">Diese Woche</h3>
           <span id="week-phase" class="text-xs font-medium text-teal-400">Phase: BUILD</span>
         </div>
-        <div id="week-dots" class="grid grid-cols-7 gap-2"></div>
+        <div id="week-dots" class="grid grid-cols-7 gap-1 sm:gap-2"></div>
       </section>
 
       <!-- Screen 2: Conversational Check-in (Things 3 / Messenger UX) -->
-      <section class="glass-card rounded-2xl p-5">
+      <section class="glass-card rounded-2xl p-4 sm:p-5">
         <div class="flex items-center gap-2 mb-3">
           <svg class="w-4 h-4 text-teal-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 100-6 3 3 0 000 6z"></path></svg>
           <h3 class="text-sm font-semibold tracking-tight text-slate-200">Conversational Coach</h3>
         </div>
 
         <div id="chat-messages" class="flex flex-col gap-3 max-h-80 overflow-y-auto mb-3 text-sm pr-1">
-          <div class="bg-slate-800/80 rounded-2xl rounded-tl-sm p-3 max-w-[88%] text-slate-300">
+          <div class="bg-slate-800/80 rounded-2xl rounded-tl-sm p-3 max-w-[90%] sm:max-w-[88%] text-slate-300 break-words">
             Wie war dein Training heute? Erzähl mir frei von Distanz, Gefühl (RPE 1-10) oder etwaigen Schmerzen / Symptomen.
           </div>
         </div>
 
         <form onsubmit="handleCheckinSubmit(event)" class="relative flex items-center">
-          <input id="checkin-input" type="text" placeholder="z.B. '6 km gelaufen, Knie zwickt leicht (3/10), sonst RPE 6'" 
-                 class="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 pl-3.5 pr-12 text-sm text-slate-200 focus:outline-none focus:border-teal-500 transition placeholder-slate-500">
+          <input id="checkin-input" type="text" placeholder="z.B. '6 km gelaufen, Knie zwickt leicht (3/10)'" 
+                 class="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 pl-3.5 pr-11 text-xs sm:text-sm text-slate-200 focus:outline-none focus:border-teal-500 transition placeholder-slate-500">
           <button type="submit" class="absolute right-1.5 p-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white transition">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
           </button>
@@ -746,46 +746,46 @@ def index():
     </div>
 
     <!-- ================= TAB 2: WOCHENPLAN (Screen 3) ================= -->
-    <div id="view-wochenplan" class="hidden flex flex-col gap-5">
-      <div class="flex items-center justify-between">
+    <div id="view-wochenplan" class="hidden flex flex-col gap-4 sm:gap-5">
+      <div class="flex flex-col xs:flex-row xs:items-center justify-between gap-2.5">
         <div>
-          <h2 class="text-lg font-bold tracking-tight text-white">Wochenplan</h2>
-          <p id="week-carousel-subtitle" class="text-xs text-slate-400">Horizontale Wochen-Ansicht mit Tages-Workout-Karten</p>
+          <h2 class="text-base sm:text-lg font-bold tracking-tight text-white">Wochenplan</h2>
+          <p id="week-carousel-subtitle" class="text-xs text-slate-400">Tages-Workout-Karten im Überblick</p>
         </div>
-        <div class="flex items-center gap-1.5">
-          <button onclick="prevCarouselWeek()" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition">◀ Vorherige</button>
-          <span id="current-carousel-week-label" class="text-xs font-mono font-bold text-teal-400 px-2">Woche 1</span>
-          <button onclick="nextCarouselWeek()" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition">Nächste ▶</button>
+        <div class="flex items-center justify-between xs:justify-end gap-1.5">
+          <button onclick="prevCarouselWeek()" class="p-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition">◀ Vorherige</button>
+          <span id="current-carousel-week-label" class="text-xs font-mono font-bold text-teal-400 px-1 truncate">Woche 1</span>
+          <button onclick="nextCarouselWeek()" class="p-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition">Nächste ▶</button>
         </div>
       </div>
 
       <!-- Weekly Carousel Header Meta -->
       <div id="carousel-week-meta" class="glass-card rounded-xl p-3 flex items-center justify-between text-xs border border-teal-500/20">
-        <div class="flex items-center gap-2">
-          <span id="carousel-phase-badge" class="px-2 py-0.5 rounded bg-teal-500/20 text-teal-300 font-bold uppercase tracking-wider text-[10px]">BUILD</span>
-          <span id="carousel-meso-text" class="text-slate-300">Woche vor Deload</span>
+        <div class="flex items-center gap-2 min-w-0">
+          <span id="carousel-phase-badge" class="px-2 py-0.5 rounded bg-teal-500/20 text-teal-300 font-bold uppercase tracking-wider text-[10px] shrink-0">BUILD</span>
+          <span id="carousel-meso-text" class="text-slate-300 truncate">Woche vor Deload</span>
         </div>
-        <div class="font-mono font-bold text-slate-200" id="carousel-volume-text">36.0 km</div>
+        <div class="font-mono font-bold text-slate-200 shrink-0 ml-2" id="carousel-volume-text">36.0 km</div>
       </div>
 
       <!-- 7 Day Workout Cards Carousel -->
-      <div id="weekly-days-cards" class="flex flex-col gap-3">
+      <div id="weekly-days-cards" class="flex flex-col gap-2.5 sm:gap-3">
         <!-- Dynamically rendered day cards -->
       </div>
     </div>
 
     <!-- ================= TAB 3: MAKROZYKLUS (Screen 4) ================= -->
-    <div id="view-makro" class="hidden flex flex-col gap-5">
+    <div id="view-makro" class="hidden flex flex-col gap-4 sm:gap-5">
       <div>
-        <h2 class="text-lg font-bold tracking-tight text-white">Makrozyklus (Bird's-Eye-View)</h2>
-        <p class="text-xs text-slate-400">Vollständige Periodisierung & Phasenverlauf über die Plan-Dauer</p>
+        <h2 class="text-base sm:text-lg font-bold tracking-tight text-white">Makrozyklus (Bird's-Eye-View)</h2>
+        <p class="text-xs text-slate-400">Vollständige Periodisierung & Phasenverlauf</p>
       </div>
 
       <!-- Macro Volume Chart Canvas -->
-      <section class="glass-card rounded-2xl p-4 border border-slate-800/80">
+      <section class="glass-card rounded-2xl p-3.5 sm:p-4 border border-slate-800/80">
         <div class="flex justify-between items-center mb-2">
           <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Wöchentliche Volumen-Kurve</span>
-          <span class="text-[10px] text-teal-400 font-mono">Volumen (km) pro Woche</span>
+          <span class="text-[10px] text-teal-400 font-mono">Volumen (km)</span>
         </div>
         <div class="h-36 w-full relative">
           <canvas id="macroVolumeChart"></canvas>
@@ -799,25 +799,25 @@ def index():
     </div>
 
     <!-- ================= TAB 4: PROFIL & ZONEN (Screen 5) ================= -->
-    <div id="view-profil" class="hidden flex flex-col gap-5">
+    <div id="view-profil" class="hidden flex flex-col gap-4 sm:gap-5">
       <div>
-        <h2 class="text-lg font-bold tracking-tight text-white">Profil & Trainingszonen</h2>
+        <h2 class="text-base sm:text-lg font-bold tracking-tight text-white">Profil & Trainingszonen</h2>
         <p class="text-xs text-slate-400">Sportwissenschaftliche Parameter, VDOT-Paces und Biomarker</p>
       </div>
 
       <!-- User Profile & Performance Numbers -->
-      <section class="glass-card rounded-2xl p-5 border border-slate-800 flex flex-col gap-4">
+      <section class="glass-card rounded-2xl p-4 sm:p-5 border border-slate-800 flex flex-col gap-4">
         <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-          <div>
-            <h3 id="profile-display-name" class="font-bold text-base text-white">Stephan Bolten</h3>
+          <div class="min-w-0">
+            <h3 id="profile-display-name" class="font-bold text-base text-white truncate">Stephan Bolten</h3>
             <span class="text-xs text-teal-400 font-mono">Athleten-Profil · Zürich</span>
           </div>
-          <button onclick="saveUserProfile()" class="px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-semibold text-xs shadow transition">
+          <button onclick="saveUserProfile()" class="px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-semibold text-xs shadow transition shrink-0">
             Speichern
           </button>
         </div>
 
-        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3 text-xs">
           <div>
             <label class="block text-[10px] uppercase tracking-wider text-slate-400 mb-1 font-semibold">Ruhepuls (BPM)</label>
             <input id="input-resting-hr" type="number" placeholder="z.B. 48" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 font-mono text-xs focus:border-teal-500 outline-none">
@@ -836,26 +836,26 @@ def index():
           </div>
         </div>
 
-        <div class="pt-2 border-t border-slate-800 flex items-center justify-between">
-          <div>
+        <div class="pt-2 border-t border-slate-800 flex items-center justify-between gap-3">
+          <div class="min-w-0">
             <div class="text-xs font-semibold text-slate-200">Female Cycle Tracking</div>
-            <div class="text-[10px] text-slate-400">Passt Engine-Sensitivität in Lutealphase für RPE & Puls automatisch an</div>
+            <div class="text-[10px] text-slate-400 break-words">Passt Engine-Sensitivität in Lutealphase für RPE & Puls automatisch an</div>
           </div>
-          <input id="input-cycle-toggle" type="checkbox" class="w-4 h-4 rounded text-teal-600 bg-slate-900 border-slate-700 focus:ring-teal-500">
+          <input id="input-cycle-toggle" type="checkbox" class="w-4 h-4 rounded text-teal-600 bg-slate-900 border-slate-700 focus:ring-teal-500 shrink-0">
         </div>
       </section>
 
       <!-- Daniels VDOT & Calculated Training Zones -->
-      <section class="glass-card rounded-2xl p-5 border border-slate-800">
-        <div class="flex items-center justify-between mb-3">
+      <section class="glass-card rounded-2xl p-4 sm:p-5 border border-slate-800">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 mb-3">
           <div>
             <h3 class="font-bold text-sm text-white">Daniels VDOT Trainingszonen</h3>
-            <p class="text-[11px] text-slate-400">Paces nach Jack Daniels Running Formula (VDOT-Berechnung)</p>
+            <p class="text-[11px] text-slate-400">Paces nach Jack Daniels Running Formula</p>
           </div>
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-2 self-start sm:self-auto">
             <span class="text-xs text-slate-400 font-mono">VDOT:</span>
             <input id="input-vdot-val" type="number" step="0.5" class="w-14 bg-slate-950 border border-slate-700 rounded p-1 text-center font-mono text-xs text-teal-400 font-bold focus:border-teal-500 outline-none" value="48.0">
-            <button onclick="recalculateZonesBtn()" class="px-2.5 py-1 rounded bg-teal-500/20 hover:bg-teal-500/30 text-teal-300 border border-teal-500/30 text-[11px] font-semibold transition">
+            <button onclick="recalculateZonesBtn()" class="px-2.5 py-1 rounded bg-teal-500/20 hover:bg-teal-500/30 text-teal-300 border border-teal-500/30 text-[11px] font-semibold transition shrink-0">
               Neu berechnen
             </button>
           </div>
@@ -1227,7 +1227,7 @@ def index():
       days.forEach((dayName, idx) => {
         const wo = currentWeekWorkouts.find(w => w.day_of_week === (idx + 1));
         const col = document.createElement('div');
-        col.className = 'flex flex-col items-center gap-1.5 p-2 rounded-xl bg-slate-900/60 border border-slate-800/60';
+        col.className = 'flex flex-col items-center gap-1 p-1.5 sm:p-2 rounded-xl bg-slate-900/60 border border-slate-800/60 min-w-0';
 
         let dotColor = 'bg-slate-700';
         let statusText = 'Rest';
@@ -1239,9 +1239,9 @@ def index():
         }
 
         col.innerHTML = `
-          <span class="text-[11px] font-semibold text-slate-400">${dayName}</span>
-          <span class="w-3.5 h-3.5 rounded-full ${dotColor}"></span>
-          <span class="text-[9px] font-mono text-slate-500 truncate w-full text-center">${statusText}</span>
+          <span class="text-[10px] sm:text-[11px] font-semibold text-slate-400">${dayName}</span>
+          <span class="w-3 h-3 sm:w-3.5 sm:h-3.5 rounded-full ${dotColor}"></span>
+          <span class="text-[8px] sm:text-[9px] font-mono text-slate-500 truncate w-full text-center">${statusText}</span>
         `;
         container.appendChild(col);
       });
@@ -1259,7 +1259,7 @@ def index():
       // Meta
       const phaseBadge = document.getElementById('carousel-phase-badge');
       phaseBadge.innerText = curWeek.phase.toUpperCase();
-      phaseBadge.className = `px-2 py-0.5 rounded font-bold uppercase tracking-wider text-[10px] ${
+      phaseBadge.className = `px-2 py-0.5 rounded font-bold uppercase tracking-wider text-[10px] shrink-0 ${
         curWeek.phase === 'peak' ? 'bg-red-500/20 text-red-300' :
         curWeek.phase === 'taper' ? 'bg-emerald-500/20 text-emerald-300' :
         curWeek.phase === 'build' ? 'bg-orange-500/20 text-orange-300' : 'bg-blue-500/20 text-blue-300'
@@ -1286,9 +1286,9 @@ def index():
 
         let statusBadge = '';
         if (wo) {
-          if (wo.status === 'completed') statusBadge = '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-semibold">Erledigt</span>';
-          else if (wo.workout_type === 'rest') statusBadge = '<span class="px-2 py-0.5 rounded bg-slate-800 text-slate-400 text-[10px]">Ruhetag</span>';
-          else statusBadge = '<span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-semibold">Geplant</span>';
+          if (wo.status === 'completed') statusBadge = '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-semibold shrink-0">Erledigt</span>';
+          else if (wo.workout_type === 'rest') statusBadge = '<span class="px-2 py-0.5 rounded bg-slate-800 text-slate-400 text-[10px] shrink-0">Ruhetag</span>';
+          else statusBadge = '<span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-semibold shrink-0">Geplant</span>';
         }
 
         let sportIcon = '🏃';
@@ -1296,22 +1296,22 @@ def index():
         else if (wo && wo.sport_type === 'swimming') sportIcon = '🏊';
         else if (wo && wo.sport_type === 'strength') sportIcon = '🏋️';
 
-        card.className = `glass-card rounded-xl p-3.5 border ${borderClass} ${opacityClass} flex items-center justify-between text-xs transition`;
+        card.className = `glass-card rounded-xl p-3 sm:p-3.5 border ${borderClass} ${opacityClass} flex items-center justify-between gap-2 text-xs transition`;
         card.innerHTML = `
-          <div class="flex items-center gap-3">
-            <div class="w-8 h-8 rounded-lg bg-slate-800 flex items-center justify-center text-sm">${wo ? sportIcon : '😴'}</div>
-            <div>
+          <div class="flex items-center gap-2.5 sm:gap-3 min-w-0">
+            <div class="w-8 h-8 rounded-lg bg-slate-800 flex items-center justify-center text-sm shrink-0">${wo ? sportIcon : '😴'}</div>
+            <div class="min-w-0">
               <div class="flex items-center gap-2">
-                <span class="font-bold text-white text-sm">${dayNames[dayNum - 1]}</span>
-                <span class="text-[10px] font-mono text-slate-500">${wo ? wo.date : ''}</span>
+                <span class="font-bold text-white text-sm truncate">${dayNames[dayNum - 1]}</span>
+                <span class="text-[10px] font-mono text-slate-500 shrink-0">${wo ? wo.date : ''}</span>
               </div>
-              <div class="text-slate-400 mt-0.5">
+              <div class="text-slate-400 mt-0.5 truncate">
                 ${wo ? (wo.workout_type === 'rest' ? 'Regeneration' : `${wo.workout_type.toUpperCase()} · ${wo.metric_primary} ${wo.metric_unit}`) : 'Ruhetag'}
-                ${wo && wo.intensity_detail ? `<span class="text-slate-500 block text-[11px] italic">${wo.intensity_detail}</span>` : ''}
+                ${wo && wo.intensity_detail ? `<span class="text-slate-500 block text-[11px] italic truncate">${wo.intensity_detail}</span>` : ''}
               </div>
             </div>
           </div>
-          <div>${statusBadge}</div>
+          <div class="shrink-0">${statusBadge}</div>
         `;
         container.appendChild(card);
       }
@@ -1392,20 +1392,20 @@ def index():
                            w.phase === 'taper' ? 'text-emerald-400 border-emerald-500/30' :
                            w.phase === 'build' ? 'text-orange-400 border-orange-500/30' : 'text-blue-400 border-blue-500/30';
 
-        item.className = `p-3 rounded-xl bg-slate-950/70 border ${isCurrentWeek ? 'border-teal-500 ring-1 ring-teal-500/40 bg-teal-950/20' : 'border-slate-800/80'} flex items-center justify-between text-xs transition`;
+        item.className = `p-3 rounded-xl bg-slate-950/70 border ${isCurrentWeek ? 'border-teal-500 ring-1 ring-teal-500/40 bg-teal-950/20' : 'border-slate-800/80'} flex items-center justify-between gap-2 text-xs transition`;
         item.innerHTML = `
-          <div class="flex items-center gap-3">
-            <div class="font-mono font-bold text-slate-400 w-8">W${w.week_number}</div>
-            <div>
-              <div class="flex items-center gap-2">
+          <div class="flex items-center gap-2.5 sm:gap-3 min-w-0">
+            <div class="font-mono font-bold text-slate-400 w-7 sm:w-8 shrink-0">W${w.week_number}</div>
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-1 sm:gap-1.5">
                 <span class="font-bold uppercase tracking-wider text-[11px] ${phaseColor}">${w.phase}</span>
-                ${isCurrentWeek ? '<span class="px-1.5 py-0.5 rounded bg-teal-500/20 text-teal-300 font-bold text-[9px]">📍 DU BIST HIER</span>' : ''}
-                ${w.is_recovery_week ? '<span class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-semibold text-[9px]">Entlastung</span>' : ''}
+                ${isCurrentWeek ? '<span class="px-1.5 py-0.5 rounded bg-teal-500/20 text-teal-300 font-bold text-[9px] shrink-0">📍 HIER</span>' : ''}
+                ${w.is_recovery_week ? '<span class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-semibold text-[9px] shrink-0">Entlastung</span>' : ''}
               </div>
-              <span class="text-[10px] font-mono text-slate-500">${w.week_start_date}</span>
+              <span class="text-[10px] font-mono text-slate-500 block truncate">${w.week_start_date}</span>
             </div>
           </div>
-          <div class="font-mono font-bold text-slate-200">
+          <div class="font-mono font-bold text-slate-200 shrink-0 ml-2">
             ${w.target_weekly_volume} km
           </div>
         `;
@@ -1551,26 +1551,26 @@ def index():
         const ev = data.event;
 
         let pillsHtml = `<div class="flex flex-wrap gap-1.5 mt-2">`;
-        pillsHtml += `<span class="px-2 py-0.5 rounded-md bg-teal-500/20 text-teal-300 border border-teal-500/30 text-[11px] font-mono">Status: ${ev.completion_status.toUpperCase()}</span>`;
+        pillsHtml += `<span class="px-2 py-0.5 rounded-md bg-teal-500/20 text-teal-300 border border-teal-500/30 text-[11px] font-mono shrink-0">Status: ${ev.completion_status.toUpperCase()}</span>`;
         if (ev.actual_metrics && ev.actual_metrics.metric_primary) {
-          pillsHtml += `<span class="px-2 py-0.5 rounded-md bg-slate-700 text-slate-200 text-[11px] font-mono">${ev.actual_metrics.metric_primary} ${ev.actual_metrics.unit}</span>`;
+          pillsHtml += `<span class="px-2 py-0.5 rounded-md bg-slate-700 text-slate-200 text-[11px] font-mono shrink-0">${ev.actual_metrics.metric_primary} ${ev.actual_metrics.unit}</span>`;
         }
         if (ev.perceived_rpe) {
-          pillsHtml += `<span class="px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[11px] font-mono">RPE: ${ev.perceived_rpe}/10</span>`;
+          pillsHtml += `<span class="px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[11px] font-mono shrink-0">RPE: ${ev.perceived_rpe}/10</span>`;
         }
         if (ev.symptoms && ev.symptoms.length > 0) {
           ev.symptoms.forEach(s => {
-            pillsHtml += `<span class="px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px] font-mono">⚠️ ${s.type} (${s.severity}/10)</span>`;
+            pillsHtml += `<span class="px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px] font-mono shrink-0">⚠️ ${s.type} (${s.severity}/10)</span>`;
           });
         }
         pillsHtml += `</div>`;
 
         const confirmId = 'confirm-' + Date.now();
         const confirmationBubble = `
-          <div id="${confirmId}" class="bg-slate-800 rounded-2xl rounded-tl-sm p-3 max-w-[90%] text-slate-200 text-sm border border-teal-500/30">
+          <div id="${confirmId}" class="bg-slate-800 rounded-2xl rounded-tl-sm p-3 max-w-[95%] sm:max-w-[90%] text-slate-200 text-sm border border-teal-500/30">
             <div class="font-semibold text-teal-300">Ich habe Folgendes verstanden:</div>
             ${pillsHtml}
-            <div class="mt-3 pt-2.5 border-t border-slate-700 flex items-center justify-between gap-2">
+            <div class="mt-3 pt-2.5 border-t border-slate-700 flex flex-col xs:flex-row items-start xs:items-center justify-between gap-2">
               <span class="text-xs text-slate-300 font-medium">Stimmt das so?</span>
               <div class="flex gap-2">
                 <button onclick="discardConfirmation('${confirmId}')" class="px-2.5 py-1 text-xs rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition">Verwerfen</button>
@@ -1627,21 +1627,21 @@ def index():
             <span class="text-[11px] font-bold uppercase tracking-wider text-slate-400">Plan-Anpassungen (Vorher vs. Nachher):</span>`;
           data.diffs.forEach(d => {
             reply += `
-              <div class="p-2 rounded-xl bg-slate-950/80 border border-slate-700/80 text-xs flex flex-col gap-1">
+              <div class="p-2.5 rounded-xl bg-slate-950/80 border border-slate-700/80 text-xs flex flex-col gap-1.5">
                 <span class="font-mono text-slate-400 font-semibold text-[11px]">${d.date}</span>
-                <div class="flex items-center gap-2">
+                <div class="flex flex-wrap items-center gap-1.5">
                   <span class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-300 line-through text-[11px]">${d.before.workout_type.toUpperCase()} · ${d.before.metric_primary}${d.before.metric_unit}</span>
                   <span class="text-slate-500">→</span>
                   <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold text-[11px]">${d.after.workout_type.toUpperCase()} · ${d.after.metric_primary}${d.after.metric_unit}</span>
                 </div>
-                ${d.after.intensity_detail ? `<span class="text-[10px] text-slate-400 italic">${d.after.intensity_detail}</span>` : ''}
+                ${d.after.intensity_detail ? `<span class="text-[10px] text-slate-400 italic break-words">${d.after.intensity_detail}</span>` : ''}
               </div>
             `;
           });
           reply += `</div>`;
         }
 
-        chat.innerHTML += `<div class="bg-slate-800 rounded-2xl rounded-tl-sm p-3 max-w-[92%] text-slate-200 text-sm border border-slate-700">${reply}</div>`;
+        chat.innerHTML += `<div class="bg-slate-800 rounded-2xl rounded-tl-sm p-3 max-w-[95%] sm:max-w-[92%] text-slate-200 text-sm border border-slate-700">${reply}</div>`;
         chat.scrollTop = chat.scrollHeight;
 
         await loadState();
@@ -1682,14 +1682,14 @@ def index():
             <span class="text-[11px] font-bold uppercase tracking-wider text-slate-400">Plan-Anpassungen (Vorher vs. Nachher):</span>`;
           data.diffs.forEach(d => {
             reply += `
-              <div class="p-2 rounded-xl bg-slate-950/80 border border-slate-700/80 text-xs flex flex-col gap-1">
+              <div class="p-2.5 rounded-xl bg-slate-950/80 border border-slate-700/80 text-xs flex flex-col gap-1.5">
                 <span class="font-mono text-slate-400 font-semibold text-[11px]">${d.date}</span>
-                <div class="flex items-center gap-2">
+                <div class="flex flex-wrap items-center gap-1.5">
                   <span class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-300 line-through text-[11px]">${d.before.workout_type.toUpperCase()} · ${d.before.metric_primary}${d.before.metric_unit}</span>
                   <span class="text-slate-500">→</span>
                   <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold text-[11px]">${d.after.workout_type.toUpperCase()} · ${d.after.metric_primary}${d.after.metric_unit}</span>
                 </div>
-                ${d.after.intensity_detail ? `<span class="text-[10px] text-slate-400 italic">${d.after.intensity_detail}</span>` : ''}
+                ${d.after.intensity_detail ? `<span class="text-[10px] text-slate-400 italic break-words">${d.after.intensity_detail}</span>` : ''}
               </div>
             `;
           });
