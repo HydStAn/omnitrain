@@ -71,13 +71,20 @@ def get_state(plan_id: Optional[str] = None, show_archived: bool = False):
             (selected_plan_id,)
         ).fetchall()
 
-        # 2. Zones
+        # 2. Zones for current plan sport
+        plan_sport = plan_row["sport_type"] if plan_row else "running"
         zone_row = conn.execute(
-            "SELECT * FROM training_zones WHERE user_id = ? ORDER BY calculated_at DESC LIMIT 1;",
-            (user_id,)
+            "SELECT * FROM training_zones WHERE user_id = ? AND sport_type = ? ORDER BY calculated_at DESC LIMIT 1;",
+            (user_id, plan_sport)
         ).fetchone()
+        if not zone_row:
+            zone_row = conn.execute(
+                "SELECT * FROM training_zones WHERE user_id = ? ORDER BY calculated_at DESC LIMIT 1;",
+                (user_id,)
+            ).fetchone()
         zones = json.loads(zone_row["zones_json"]) if zone_row else {}
         ref_vdot = zone_row["reference_value"] if zone_row else 45.0
+        zone_model = zone_row["zone_model"] if zone_row else "daniels_vdot"
 
         # 3. User & Profile
         user_row = conn.execute("SELECT * FROM users WHERE id = ? LIMIT 1;", (user_id,)).fetchone()
@@ -122,6 +129,7 @@ def get_state(plan_id: Optional[str] = None, show_archived: bool = False):
             "weeks": [dict(w) for w in weeks],
             "zones": zones,
             "ref_vdot": ref_vdot,
+            "zone_model": zone_model,
             "user": user_dict,
             "profile": profile_json,
             "pmc": latest_pmc,
@@ -894,16 +902,16 @@ def index():
         </div>
       </section>
 
-      <!-- Daniels VDOT & Calculated Training Zones -->
+      <!-- Multi-Sport Calculated Training Zones -->
       <section class="glass-card rounded-2xl p-4 sm:p-5 border border-slate-800">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 mb-3">
           <div>
-            <h3 class="font-bold text-sm text-white">Daniels VDOT Trainingszonen</h3>
-            <p class="text-[11px] text-slate-400">Paces nach Jack Daniels Running Formula</p>
+            <h3 id="zones-title" class="font-bold text-sm text-white">Daniels VDOT Trainingszonen</h3>
+            <p id="zones-subtitle" class="text-[11px] text-slate-400">Paces nach Jack Daniels Running Formula</p>
           </div>
           <div class="flex items-center gap-2 self-start sm:self-auto">
-            <span class="text-xs text-slate-400 font-mono">VDOT:</span>
-            <input id="input-vdot-val" type="number" step="0.5" class="w-14 bg-slate-950 border border-slate-700 rounded p-1 text-center font-mono text-xs text-teal-400 font-bold focus:border-teal-500 outline-none" value="48.0">
+            <span id="zones-ref-label" class="text-xs text-slate-400 font-mono">VDOT:</span>
+            <input id="input-vdot-val" type="number" step="0.5" class="w-16 bg-slate-950 border border-slate-700 rounded p-1 text-center font-mono text-xs text-teal-400 font-bold focus:border-teal-500 outline-none" value="48.0">
             <button onclick="recalculateZonesBtn()" class="px-2.5 py-1 rounded bg-teal-500/20 hover:bg-teal-500/30 text-teal-300 border border-teal-500/30 text-[11px] font-semibold transition shrink-0">
               Neu berechnen
             </button>
@@ -915,7 +923,7 @@ def index():
             <thead>
               <tr class="text-slate-400 border-b border-slate-800/80">
                 <th class="pb-2">Zone</th>
-                <th class="pb-2">Pace-Bereich</th>
+                <th id="zones-col-target" class="pb-2">Ziel-Bereich</th>
                 <th class="pb-2">Fokus & Trainingswirkung</th>
               </tr>
             </thead>
@@ -1016,19 +1024,18 @@ def index():
           <div class="grid grid-cols-2 gap-3 text-xs">
             <div>
               <label class="block text-[10px] uppercase text-slate-400 font-semibold mb-1">Sportart</label>
-              <select id="guided-sport" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 text-xs focus:border-teal-500 outline-none">
+              <select id="guided-sport" onchange="onSportChange(this.value)" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 text-xs focus:border-teal-500 outline-none">
                 <option value="running">Laufen (Running)</option>
                 <option value="cycling">Radfahren (Cycling)</option>
-                <option value="triathlon">Triathlon</option>
+                <option value="swimming">Schwimmen (Swimming)</option>
+                <option value="strength">Krafttraining (Strength / DUP)</option>
+                <option value="triathlon">Triathlon (Multi-Sport)</option>
               </select>
             </div>
             <div>
               <label class="block text-[10px] uppercase text-slate-400 font-semibold mb-1">Ziel-Event</label>
               <select id="guided-goal" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 text-xs focus:border-teal-500 outline-none">
-                <option value="half_marathon">Halbmarathon (21.1 km)</option>
-                <option value="marathon">Marathon (42.2 km)</option>
-                <option value="10k">10 km Wettkampf</option>
-                <option value="5k">5 km Speed</option>
+                <!-- Dynamically populated based on selected sport -->
               </select>
             </div>
           </div>
@@ -1038,11 +1045,11 @@ def index():
               <input id="guided-weeks" type="number" value="16" min="4" max="32" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 font-mono text-xs focus:border-teal-500 outline-none">
             </div>
             <div>
-              <label class="block text-[10px] uppercase text-slate-400 font-semibold mb-1">Basis-Volumen (km)</label>
-              <input id="guided-volume" type="number" value="30" min="10" max="150" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 font-mono text-xs focus:border-teal-500 outline-none">
+              <label id="guided-volume-label" class="block text-[10px] uppercase text-slate-400 font-semibold mb-1 truncate">Basis (km/W)</label>
+              <input id="guided-volume" type="number" value="30" min="1" max="15000" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 font-mono text-xs focus:border-teal-500 outline-none">
             </div>
             <div>
-              <label class="block text-[10px] uppercase text-slate-400 font-semibold mb-1">VDOT / Fitness</label>
+              <label id="guided-vdot-label" class="block text-[10px] uppercase text-slate-400 font-semibold mb-1 truncate">VDOT / Fitness</label>
               <input id="guided-vdot" type="number" step="0.5" value="46.0" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 font-mono text-xs focus:border-teal-500 outline-none">
             </div>
           </div>
@@ -1566,17 +1573,57 @@ def index():
         document.getElementById('input-vdot-val').value = appState.ref_vdot;
       }
 
+      // Multi-Sport Zones Header & Table Rendering
+      const curSport = appState.active_plan ? appState.active_plan.sport_type : 'running';
+      const zonesTitle = document.getElementById('zones-title');
+      const zonesSubtitle = document.getElementById('zones-subtitle');
+      const zonesRefLabel = document.getElementById('zones-ref-label');
+      const colTarget = document.getElementById('zones-col-target');
+
+      if (curSport === 'cycling') {
+        zonesTitle.innerText = "Coggan 7-Zonen Leistungsmodell (FTP)";
+        zonesSubtitle.innerText = "Watt-Bereiche & Intensitätsstufen nach Dr. Andrew Coggan";
+        zonesRefLabel.innerText = "FTP (W):";
+        colTarget.innerText = "Leistung (Watt)";
+      } else if (curSport === 'swimming') {
+        zonesTitle.innerText = "Critical Swim Speed (CSS) Trainingszonen";
+        zonesSubtitle.innerText = "Paces pro 100m berechnet aus 400m / 200m Time Trials";
+        zonesRefLabel.innerText = "CSS (s):";
+        colTarget.innerText = "Pace / 100m";
+      } else if (curSport === 'strength') {
+        zonesTitle.innerText = "Strength & DUP Periodisierungs-Zonen";
+        zonesSubtitle.innerText = "Wiederholungen, % 1RM, RPE und RIR Zielkorridore";
+        zonesRefLabel.innerText = "1RM (kg):";
+        colTarget.innerText = "Intensität & Wdh";
+      } else {
+        zonesTitle.innerText = "Daniels VDOT Trainingszonen";
+        zonesSubtitle.innerText = "Paces nach Jack Daniels Running Formula";
+        zonesRefLabel.innerText = "VDOT:";
+        colTarget.innerText = "Pace-Bereich";
+      }
+
       // Full Zones Table
       const tbody = document.getElementById('zones-full-table-body');
       tbody.innerHTML = '';
       for (const [k, z] of Object.entries(appState.zones || {})) {
         const tr = document.createElement('tr');
         tr.className = 'hover:bg-slate-800/20';
-        const target = z.min_pace ? `${z.min_pace}–${z.max_pace} min/km` : (z.pace ? `${z.pace} min/km` : '-');
+
+        let target = '-';
+        if (z.min_watts !== undefined && z.max_watts !== undefined) {
+          target = `${z.min_watts}–${z.max_watts} Watt`;
+        } else if (z.min_pace && z.max_pace) {
+          target = `${z.min_pace}–${z.max_pace} min/km`;
+        } else if (z.pace) {
+          target = `${z.pace} ${curSport === 'swimming' ? 'min/100m' : 'min/km'}`;
+        } else if (z.intensity) {
+          target = `${z.intensity} (${z.rpe || ''} RPE)`;
+        }
+
         tr.innerHTML = `
           <td class="py-2.5 font-bold text-teal-400">${z.name || k}</td>
           <td class="py-2.5 font-mono text-slate-200">${target}</td>
-          <td class="py-2.5 text-slate-400">${z.description || '-'}</td>
+          <td class="py-2.5 text-slate-400">${z.description || (z.rir ? `${z.rir}, Pause: ${z.rest || ''}` : '-')}</td>
         `;
         tbody.appendChild(tr);
       }
@@ -1887,9 +1934,89 @@ def index():
       }
     }
 
+    const SPORT_GOALS = {
+      running: [
+        { value: 'marathon', label: 'Marathon (42.2 km)' },
+        { value: 'half_marathon', label: 'Halbmarathon (21.1 km)' },
+        { value: '10k', label: '10 km Wettkampf' },
+        { value: '5k', label: '5 km Speed' }
+      ],
+      cycling: [
+        { value: 'ftp_builder', label: 'FTP Builder / Schwellenpower' },
+        { value: 'gran_fondo', label: 'Gran Fondo / Radmarathon (120+ km)' },
+        { value: 'climbing', label: 'Berg- & Kletter-Spezialist' },
+        { value: 'time_trial', label: 'Einzelzeitfahren / TT' },
+        { value: 'criterium', label: 'Kriterium / Sprint & VO2max' }
+      ],
+      swimming: [
+        { value: 'css_improvement', label: 'CSS Schwellen-Verbesserung' },
+        { value: 'open_water', label: 'Open Water / Freiwasser-Langdistanz' },
+        { value: 'endurance_1500m', label: '1500 m Ausdauerschwimmen' },
+        { value: 'speed_sprint', label: 'Sprint & Technik (50-200m)' }
+      ],
+      strength: [
+        { value: 'hypertrophy', label: 'Hypertrophie (Muskelaufbau / DUP)' },
+        { value: 'max_strength', label: 'Maximalkraft (Powerlifting / 1RM)' },
+        { value: 'strength_endurance', label: 'Kraftausdauer / Definition' }
+      ],
+      triathlon: [
+        { value: 'triathlon_olympic', label: 'Olympische Distanz (1.5 / 40 / 10)' },
+        { value: 'triathlon_70_3', label: 'Mitteldistanz / 70.3 (1.9 / 90 / 21.1)' },
+        { value: 'triathlon_ironman', label: 'Langdistanz / Ironman (3.8 / 180 / 42.2)' },
+        { value: 'triathlon_sprint', label: 'Sprint-Distanz (0.75 / 20 / 5)' }
+      ]
+    };
+
+    function onSportChange(sport) {
+      const goalSelect = document.getElementById('guided-goal');
+      if (!goalSelect) return;
+      goalSelect.innerHTML = '';
+      const goals = SPORT_GOALS[sport] || SPORT_GOALS['running'];
+      goals.forEach(g => {
+        const opt = document.createElement('option');
+        opt.value = g.value;
+        opt.innerText = g.label;
+        goalSelect.appendChild(opt);
+      });
+
+      // Adjust labels and placeholders
+      const volLabel = document.getElementById('guided-volume-label');
+      const volInput = document.getElementById('guided-volume');
+      const vdotLabel = document.getElementById('guided-vdot-label');
+      const vdotInput = document.getElementById('guided-vdot');
+
+      if (sport === 'cycling') {
+        volLabel.innerText = "Basis (TSS / W)";
+        volInput.value = 250;
+        vdotLabel.innerText = "FTP (Watt)";
+        vdotInput.value = 220;
+      } else if (sport === 'swimming') {
+        volLabel.innerText = "Basis (Meter / W)";
+        volInput.value = 4000;
+        vdotLabel.innerText = "CSS (s/100m)";
+        vdotInput.value = 105;
+      } else if (sport === 'strength') {
+        volLabel.innerText = "Basis (Sätze / W)";
+        volInput.value = 14;
+        vdotLabel.innerText = "1RM Benchmark (kg)";
+        vdotInput.value = 100;
+      } else if (sport === 'triathlon') {
+        volLabel.innerText = "Basis (TSS / W)";
+        volInput.value = 350;
+        vdotLabel.innerText = "Lauf VDOT";
+        vdotInput.value = 46;
+      } else {
+        volLabel.innerText = "Basis (km/W)";
+        volInput.value = 30;
+        vdotLabel.innerText = "VDOT / Fitness";
+        vdotInput.value = 46;
+      }
+    }
+
     // ================= SCREEN 6: ONBOARDING FLOW =================
     function openOnboardModal() {
       document.getElementById('onboard-modal').classList.remove('hidden');
+      onSportChange(document.getElementById('guided-sport').value || 'running');
       backToOnboardInput();
     }
     function closeOnboardModal() {
@@ -1907,6 +2034,7 @@ def index():
         document.getElementById('onboard-guided-box').classList.remove('hidden');
         document.getElementById('onboard-mode-guided-btn').className = "text-teal-400 font-bold border-b-2 border-teal-400 pb-1";
         document.getElementById('onboard-mode-chat-btn').className = "text-slate-400 hover:text-slate-200 pb-1";
+        onSportChange(document.getElementById('guided-sport').value || 'running');
       }
     }
 
@@ -1922,12 +2050,19 @@ def index():
       const data = await res.json();
       const p = data.parsed;
 
+      let baseVol = p.current_baseline.value || 30.0;
+      let refFit = p.user_profile.vdot || 45.0;
+      if (p.sport_type === 'cycling' && baseVol < 50) baseVol = 250.0;
+      if (p.sport_type === 'swimming' && baseVol < 500) baseVol = 4000.0;
+      if (p.sport_type === 'strength' && baseVol > 40) baseVol = 14.0;
+      if (p.sport_type === 'triathlon' && baseVol < 100) baseVol = 350.0;
+
       pendingPlanParams = {
         sport: p.sport_type,
         goal: p.target_event,
-        vdot: p.user_profile.vdot || 45.0,
+        vdot: refFit,
         weeks_count: p.target_weeks || 16,
-        baseline_volume: p.current_baseline.value || 30.0
+        baseline_volume: baseVol
       };
 
       showSummaryView();
@@ -1948,11 +2083,19 @@ def index():
       document.getElementById('onboard-step-input').classList.add('hidden');
       document.getElementById('onboard-step-summary').classList.remove('hidden');
 
+      const sport = pendingPlanParams.sport;
+      let volUnit = "km/W";
+      let fitLabel = "VDOT";
+      if (sport === 'cycling') { volUnit = "TSS/W"; fitLabel = "FTP (W)"; }
+      else if (sport === 'swimming') { volUnit = "m/W"; fitLabel = "CSS (s/100m)"; }
+      else if (sport === 'strength') { volUnit = "Sätze/W"; fitLabel = "1RM (kg)"; }
+      else if (sport === 'triathlon') { volUnit = "TSS/W"; fitLabel = "VDOT"; }
+
       document.getElementById('sum-sport').innerText = pendingPlanParams.sport.toUpperCase();
       document.getElementById('sum-goal').innerText = pendingPlanParams.goal.replace('_', ' ').toUpperCase();
       document.getElementById('sum-weeks').innerText = `${pendingPlanParams.weeks_count} Wochen`;
-      document.getElementById('sum-volume').innerText = `${pendingPlanParams.baseline_volume} km/W`;
-      document.getElementById('sum-vdot').innerText = pendingPlanParams.vdot.toFixed(1);
+      document.getElementById('sum-volume').innerText = `${pendingPlanParams.baseline_volume} ${volUnit}`;
+      document.getElementById('sum-vdot').innerText = `${pendingPlanParams.vdot.toFixed(1)} (${fitLabel})`;
     }
 
     function backToOnboardInput() {

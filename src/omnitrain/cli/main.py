@@ -17,6 +17,10 @@ from omnitrain.load.pmc import DailyLoad, PMCEngine
 from omnitrain.parser.checkin import CheckinParser
 from omnitrain.sports.daniels import get_daniels_zones
 from omnitrain.sports.running import RunningStrategy
+from omnitrain.sports.cycling import CyclingStrategy
+from omnitrain.sports.swimming import SwimStrategy
+from omnitrain.sports.strength import StrengthStrategy
+from omnitrain.sports.triathlon import TriathlonStrategy
 from omnitrain.storage.db import Database
 
 app = typer.Typer(help="OmniTrain: Local AI-assisted Adaptive Training Engine")
@@ -276,7 +280,7 @@ def plan_new(
             )
         )
 
-        # Generate weeks & workouts via RunningStrategy
+        # Generate weeks & workouts via domain strategy
         if sport == "running":
             weeks = RunningStrategy.generate_plan(
                 plan_id=plan_id,
@@ -287,45 +291,118 @@ def plan_new(
                 vdot=vdot,
                 sessions_per_week=4
             )
-
-            # Persist Daniels Training Zones
             zones = get_daniels_zones(vdot)
-            zone_id = str(uuid.uuid4())
+            zone_model = "daniels_vdot"
+            ref_val = vdot
+        elif sport == "cycling":
+            strat = CyclingStrategy()
+            ftp_val = vdot if vdot > 100 else 220.0
+            weeks = strat.generate_plan(
+                plan_id=plan_id,
+                start_date=start_date,
+                target_date=target_date,
+                base_weekly_volume=baseline_volume if baseline_volume > 50 else 250.0,
+                available_days=[2, 4, 6, 7],
+                reference_value=ftp_val,
+                sessions_per_week=4
+            )
+            zones = strat.calculate_zones(ftp_val)
+            zone_model = "coggan_ftp"
+            ref_val = ftp_val
+        elif sport == "swimming":
+            strat = SwimStrategy()
+            css_val = 105.0  # 1:45/100m default
+            weeks = strat.generate_plan(
+                plan_id=plan_id,
+                start_date=start_date,
+                target_date=target_date,
+                base_weekly_volume=baseline_volume if baseline_volume > 500 else 4000.0,
+                available_days=[1, 3, 5],
+                reference_value=css_val,
+                sessions_per_week=3
+            )
+            zones = strat.calculate_zones(css_val)
+            zone_model = "swim_css"
+            ref_val = css_val
+        elif sport == "strength":
+            strat = StrengthStrategy()
+            weeks = strat.generate_plan(
+                plan_id=plan_id,
+                start_date=start_date,
+                target_date=target_date,
+                base_weekly_volume=baseline_volume if baseline_volume <= 40 else 14.0,
+                available_days=[1, 3, 5],
+                reference_value=100.0,
+                sessions_per_week=3
+            )
+            zones = strat.calculate_zones(100.0)
+            zone_model = "strength_dup"
+            ref_val = 100.0
+        elif sport in ["triathlon", "multisport"]:
+            weeks = TriathlonStrategy.generate_plan(
+                plan_id=plan_id,
+                start_date=start_date,
+                target_date=target_date,
+                base_weekly_volume=baseline_volume if baseline_volume > 100 else 350.0,
+                available_days=[1, 2, 3, 4, 5, 6, 7],
+                limiter="swim",
+                target_event=goal if "triathlon" in goal else "triathlon_olympic"
+            )
+            zones = get_daniels_zones(vdot)
+            zone_model = "triathlon_hybrid"
+            ref_val = vdot
+        else:
+            # Fallback to running
+            weeks = RunningStrategy.generate_plan(
+                plan_id=plan_id,
+                start_date=start_date,
+                target_date=target_date,
+                base_weekly_volume=baseline_volume,
+                available_days=[2, 4, 6, 7],
+                vdot=vdot,
+                sessions_per_week=4
+            )
+            zones = get_daniels_zones(vdot)
+            zone_model = "daniels_vdot"
+            ref_val = vdot
+
+        # Persist Training Zones
+        zone_id = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT INTO training_zones (
+                id, user_id, sport_type, zone_model, reference_value,
+                zones_json, calculated_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            (zone_id, user_id, sport, zone_model, ref_val, json.dumps(zones), now, now, now)
+        )
+
+        for w in weeks:
             conn.execute(
                 """
-                INSERT INTO training_zones (
-                    id, user_id, sport_type, zone_model, reference_value,
-                    zones_json, calculated_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO weeks (
+                    id, plan_id, week_number, week_start_date, phase,
+                    target_weekly_volume, target_weekly_tss, is_recovery_week,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
-                (zone_id, user_id, sport, "daniels_vdot", vdot, json.dumps(zones), now, now, now)
+                (w.id, plan_id, w.week_number, w.week_start_date.isoformat(), w.phase.value,
+                 w.target_weekly_volume, w.target_weekly_tss, 1 if w.is_recovery_week else 0, now, now)
             )
-
-            for w in weeks:
+            for wo in w.workouts:
                 conn.execute(
                     """
-                    INSERT INTO weeks (
-                        id, plan_id, week_number, week_start_date, phase,
-                        target_weekly_volume, target_weekly_tss, is_recovery_week,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    INSERT INTO workouts (
+                        id, week_id, sport_type, date, day_of_week, workout_type,
+                        metric_primary, metric_unit, intensity_target, intensity_detail,
+                        target_duration_min, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """,
-                    (w.id, plan_id, w.week_number, w.week_start_date.isoformat(), w.phase.value,
-                     w.target_weekly_volume, w.target_weekly_tss, 1 if w.is_recovery_week else 0, now, now)
+                    (wo.id, w.id, wo.sport_type.value, wo.date.isoformat(), wo.day_of_week,
+                     wo.workout_type, wo.metric_primary, wo.metric_unit, wo.intensity_target,
+                     wo.intensity_detail, wo.target_duration_min, wo.status.value, now, now)
                 )
-                for wo in w.workouts:
-                    conn.execute(
-                        """
-                        INSERT INTO workouts (
-                            id, week_id, sport_type, date, day_of_week, workout_type,
-                            metric_primary, metric_unit, intensity_target, intensity_detail,
-                            target_duration_min, status, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                        """,
-                        (wo.id, w.id, wo.sport_type.value, wo.date.isoformat(), wo.day_of_week,
-                         wo.workout_type, wo.metric_primary, wo.metric_unit, wo.intensity_target,
-                         wo.intensity_detail, wo.target_duration_min, wo.status.value, now, now)
-                    )
 
         conn.commit()
 

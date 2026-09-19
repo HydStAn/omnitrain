@@ -90,27 +90,58 @@ Text: {text}"""
 
         # Sport type
         sport = "running"
-        if "rad" in lower or "bike" in lower or "cycling" in lower:
+        if "triathlon" in lower or "ironman" in lower or "70.3" in lower:
+            sport = "triathlon"
+        elif "rad" in lower or "bike" in lower or "cycling" in lower:
             sport = "cycling"
         elif "schwimm" in lower or "swim" in lower:
             sport = "swimming"
         elif "kraft" in lower or "strength" in lower or "gym" in lower:
             sport = "strength"
 
-        # Goal event
-        goal = "marathon"
-        if "halbmarathon" in lower or "half marathon" in lower or "hm" in lower:
-            goal = "half_marathon"
-        elif "10k" in lower or "10 km" in lower or "10 kilometer" in lower:
-            goal = "10k"
-        elif "5k" in lower or "5 km" in lower or "5 kilometer" in lower:
-            goal = "5k"
-        elif "marathon" in lower:
-            goal = "marathon"
-        elif "ftp" in lower:
+        # Goal event according to sport
+        if sport == "cycling":
             goal = "ftp_builder"
-        elif "hypertrophie" in lower or "muskelaufbau" in lower:
+            if "gran fondo" in lower or "granfondo" in lower or "marathon" in lower or "radmarathon" in lower or "century" in lower:
+                goal = "gran_fondo"
+            elif "zeitfahren" in lower or "time trial" in lower or "tt" in lower:
+                goal = "time_trial"
+            elif "kriterium" in lower or "criterium" in lower or "crit" in lower:
+                goal = "criterium"
+            elif "climbing" in lower or "berg" in lower or "alpen" in lower:
+                goal = "climbing"
+        elif sport == "swimming":
+            goal = "css_improvement"
+            if "open water" in lower or "freiwasser" in lower or "see" in lower:
+                goal = "open_water"
+            elif "1500" in lower or "ausdauer" in lower or "endurance" in lower:
+                goal = "endurance_1500m"
+            elif "sprint" in lower or "50m" in lower or "100m" in lower:
+                goal = "speed_sprint"
+        elif sport == "strength":
             goal = "hypertrophy"
+            if "kraft" in lower or "powerlifting" in lower or "max_strength" in lower or "1rm" in lower:
+                goal = "max_strength"
+            elif "kraftausdauer" in lower or "definition" in lower:
+                goal = "strength_endurance"
+        elif sport == "triathlon":
+            goal = "triathlon_olympic"
+            if "sprint" in lower:
+                goal = "triathlon_sprint"
+            elif "70.3" in lower or "mitteldistanz" in lower or "half ironman" in lower:
+                goal = "triathlon_70_3"
+            elif "ironman" in lower or "langdistanz" in lower or "140.6" in lower:
+                goal = "triathlon_ironman"
+        else:
+            goal = "marathon"
+            if "halbmarathon" in lower or "half marathon" in lower or "hm" in lower:
+                goal = "half_marathon"
+            elif "10k" in lower or "10 km" in lower or "10 kilometer" in lower:
+                goal = "10k"
+            elif "5k" in lower or "5 km" in lower or "5 kilometer" in lower:
+                goal = "5k"
+            elif "marathon" in lower:
+                goal = "marathon"
 
         # Weeks
         weeks = 16
