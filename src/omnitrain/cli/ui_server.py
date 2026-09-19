@@ -39,7 +39,7 @@ def get_db() -> Database:
 
 
 @app.get("/api/state")
-def get_state(plan_id: Optional[str] = None):
+def get_state(plan_id: Optional[str] = None, show_archived: bool = False):
     db = get_db()
     today_str = date.today().isoformat()
     with db.get_connection() as conn:
@@ -50,10 +50,13 @@ def get_state(plan_id: Optional[str] = None):
         if not all_plans:
             return {"active_plan": None, "all_plans": []}
 
+        active_plans = [p for p in all_plans if p["status"] == "active"]
+        candidate_plans = all_plans if show_archived else (active_plans if active_plans else all_plans)
+
         if plan_id:
-            plan_row = next((p for p in all_plans if p["id"] == plan_id), all_plans[0])
+            plan_row = next((p for p in all_plans if p["id"] == plan_id), candidate_plans[0])
         else:
-            plan_row = all_plans[0]
+            plan_row = candidate_plans[0]
 
         selected_plan_id = plan_row["id"]
         user_id = plan_row["user_id"]
@@ -563,6 +566,52 @@ def create_plan(req: PlanCreateRequest):
     return {"status": "ok"}
 
 
+class PlanActionRequest(BaseModel):
+    plan_id: str
+
+
+@app.post("/api/plan/archive")
+def archive_plan(req: PlanActionRequest):
+    db = get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    with db.get_connection() as conn:
+        conn.execute(
+            "UPDATE plans SET status = 'archived', updated_at = ? WHERE id = ?;",
+            (now, req.plan_id)
+        )
+        conn.commit()
+    return {"status": "ok", "message": "Plan archiviert"}
+
+
+@app.post("/api/plan/unarchive")
+def unarchive_plan(req: PlanActionRequest):
+    db = get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    with db.get_connection() as conn:
+        conn.execute(
+            "UPDATE plans SET status = 'active', updated_at = ? WHERE id = ?;",
+            (now, req.plan_id)
+        )
+        conn.commit()
+    return {"status": "ok", "message": "Plan reaktiviert"}
+
+
+@app.post("/api/plan/delete")
+def delete_plan(req: PlanActionRequest):
+    db = get_db()
+    with db.get_connection() as conn:
+        # Cascade delete workouts, weeks, and plan
+        conn.execute("PRAGMA foreign_keys = ON;")
+        week_ids = [r["id"] for r in conn.execute("SELECT id FROM weeks WHERE plan_id = ?;", (req.plan_id,)).fetchall()]
+        if week_ids:
+            placeholders = ",".join("?" for _ in week_ids)
+            conn.execute(f"DELETE FROM workouts WHERE week_id IN ({placeholders});", week_ids)
+            conn.execute(f"DELETE FROM weeks WHERE id IN ({placeholders});", week_ids)
+        conn.execute("DELETE FROM plans WHERE id = ?;", (req.plan_id,))
+        conn.commit()
+    return {"status": "ok", "message": "Plan gelöscht"}
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     html_content = """<!DOCTYPE html>
@@ -875,11 +924,20 @@ def index():
         </div>
       </section>
 
-      <!-- Active Plans List with Countdown -->
-      <section class="glass-card rounded-2xl p-5 border border-slate-800">
-        <h3 class="font-bold text-sm text-white mb-3">Aktive Trainingspläne & Countdowns</h3>
+      <!-- Active Plans List with Management (Archive & Delete) -->
+      <section class="glass-card rounded-2xl p-4 sm:p-5 border border-slate-800">
+        <div class="flex flex-col xs:flex-row xs:items-center justify-between gap-2 mb-3">
+          <div>
+            <h3 class="font-bold text-sm text-white">Trainingsziele & Pläne verwalten</h3>
+            <p class="text-[11px] text-slate-400">Aktive & archivierte Pläne, Countdowns und Aktionen</p>
+          </div>
+          <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none">
+            <input id="toggle-show-archived" type="checkbox" onchange="toggleShowArchived(this.checked)" class="w-3.5 h-3.5 rounded bg-slate-900 border-slate-700 text-teal-600 focus:ring-teal-500">
+            <span>Archivierte anzeigen</span>
+          </label>
+        </div>
         <div id="active-plans-list" class="flex flex-col gap-2.5">
-          <!-- Dynamically populated -->
+          <!-- Dynamically populated with actions: Switch, Archive, Delete -->
         </div>
       </section>
     </div>
@@ -1058,6 +1116,7 @@ def index():
   <script>
     let appState = null;
     let currentPlanId = null;
+    let showArchivedPlans = false;
     let pendingCheckinText = null;
     let pmcChartInstance = null;
     let macroChartInstance = null;
@@ -1066,11 +1125,20 @@ def index():
 
     async function loadState(planId = null) {
       try {
-        const url = planId ? `/api/state?plan_id=${planId}` : (currentPlanId ? `/api/state?plan_id=${currentPlanId}` : '/api/state');
+        let url = `/api/state?show_archived=${showArchivedPlans ? 'true' : 'false'}`;
+        if (planId) {
+          url += `&plan_id=${planId}`;
+        } else if (currentPlanId) {
+          url += `&plan_id=${currentPlanId}`;
+        }
         const res = await fetch(url);
         appState = await res.json();
         if (appState && appState.active_plan) {
           currentPlanId = appState.active_plan.id;
+        } else if (appState && appState.all_plans && appState.all_plans.length > 0) {
+          currentPlanId = appState.all_plans[0].id;
+        } else {
+          currentPlanId = null;
         }
         render();
       } catch (err) {
@@ -1078,27 +1146,89 @@ def index():
       }
     }
 
+    function toggleShowArchived(checked) {
+      showArchivedPlans = checked;
+      loadState();
+    }
+
     function onPlanSelect(selectedId) {
       currentPlanId = selectedId;
       loadState(selectedId);
     }
 
+    async function archivePlanAction(planId) {
+      if (!confirm("Diesen Trainingsplan wirklich archivieren? Er wird pausiert und aus der aktiven Auswahl ausgeblendet.")) return;
+      try {
+        const res = await fetch('/api/plan/archive', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({plan_id: planId})
+        });
+        const data = await res.json();
+        await loadState();
+      } catch (err) {
+        console.error(err);
+        alert("Fehler beim Archivieren des Plans.");
+      }
+    }
+
+    async function unarchivePlanAction(planId) {
+      try {
+        const res = await fetch('/api/plan/unarchive', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({plan_id: planId})
+        });
+        const data = await res.json();
+        currentPlanId = planId;
+        await loadState(planId);
+      } catch (err) {
+        console.error(err);
+        alert("Fehler beim Reaktivieren des Plans.");
+      }
+    }
+
+    async function deletePlanAction(planId, goalName) {
+      if (!confirm(`Soll der Trainingsplan '${goalName}' wirklich UNWIDERRUFLICH GELÖSCHT werden? Alle dazugehörigen Einheiten werden entfernt.`)) return;
+      try {
+        const res = await fetch('/api/plan/delete', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({plan_id: planId})
+        });
+        const data = await res.json();
+        if (currentPlanId === planId) {
+          currentPlanId = null;
+        }
+        await loadState();
+      } catch (err) {
+        console.error(err);
+        alert("Fehler beim Löschen des Plans.");
+      }
+    }
+
     function render() {
       if (!appState || !appState.active_plan) {
         document.getElementById('plan-title').innerText = "Kein aktiver Plan vorhanden";
+        const selector = document.getElementById('plan-selector');
+        if (selector) selector.innerHTML = '<option value="">Kein Plan</option>';
+        renderProfileAndZones();
         return;
       }
       const plan = appState.active_plan;
-      document.getElementById('plan-title').innerText = `${plan.sport_type.toUpperCase()} · ${plan.goal_type.replace('_', ' ').toUpperCase()} (Ziel: ${plan.target_date})`;
+      const isArchived = plan.status === 'archived';
+      document.getElementById('plan-title').innerText = `${plan.sport_type.toUpperCase()} · ${plan.goal_type.replace('_', ' ').toUpperCase()} (Ziel: ${plan.target_date})${isArchived ? ' [ARCHIVIERT]' : ''}`;
 
       // Plan Selector
       const selector = document.getElementById('plan-selector');
       if (appState.all_plans) {
         selector.innerHTML = '';
-        appState.all_plans.forEach(p => {
+        const visiblePlans = showArchivedPlans ? appState.all_plans : appState.all_plans.filter(p => p.status === 'active');
+        visiblePlans.forEach(p => {
           const opt = document.createElement('option');
           opt.value = p.id;
-          opt.innerText = `${p.sport_type.toUpperCase()}: ${p.goal_type.replace('_', ' ').toUpperCase()} (${p.target_date})`;
+          const statusTag = p.status === 'archived' ? ' 📦 [Archiv]' : '';
+          opt.innerText = `${p.sport_type.toUpperCase()}: ${p.goal_type.replace('_', ' ').toUpperCase()}${statusTag}`;
           if (p.id === plan.id) opt.selected = true;
           selector.appendChild(opt);
         });
@@ -1113,9 +1243,9 @@ def index():
       }
 
       // PMC Metrics
-      document.getElementById('pmc-ctl').innerText = appState.pmc.ctl;
-      document.getElementById('pmc-atl').innerText = appState.pmc.atl;
-      document.getElementById('pmc-tsb').innerText = appState.pmc.tsb;
+      document.getElementById('pmc-ctl').innerText = appState.pmc ? appState.pmc.ctl : '--';
+      document.getElementById('pmc-atl').innerText = appState.pmc ? appState.pmc.atl : '--';
+      document.getElementById('pmc-tsb').innerText = appState.pmc ? appState.pmc.tsb : '--';
 
       // PMC Chart
       renderPMCChart(appState.pmc_series || []);
@@ -1128,6 +1258,12 @@ def index():
         document.getElementById('today-intensity').innerText = tw.intensity_detail || tw.intensity_target || '';
         document.getElementById('today-date').innerText = tw.date;
         document.getElementById('today-status').innerText = tw.status.toUpperCase();
+      } else {
+        document.getElementById('today-workout-title').innerText = "Kein Workout";
+        document.getElementById('today-metric').innerText = "--";
+        document.getElementById('today-intensity').innerText = "";
+        document.getElementById('today-date').innerText = "";
+        document.getElementById('today-status').innerText = "";
       }
 
       // Mini-Wochenansicht
@@ -1445,29 +1581,75 @@ def index():
         tbody.appendChild(tr);
       }
 
-      // Active Plans List with Countdowns
+      // Active / Archived Plans List with Management Actions
       const plansList = document.getElementById('active-plans-list');
       plansList.innerHTML = '';
       if (appState.all_plans) {
         const today = new Date();
-        appState.all_plans.forEach(p => {
+        const displayPlans = showArchivedPlans ? appState.all_plans : appState.all_plans.filter(p => p.status === 'active');
+        
+        if (displayPlans.length === 0) {
+          plansList.innerHTML = `<div class="p-4 rounded-xl bg-slate-950/40 border border-slate-800 text-center text-xs text-slate-500 italic">Keine ${showArchivedPlans ? '' : 'aktiven '}Pläne vorhanden.</div>`;
+        }
+
+        displayPlans.forEach(p => {
           const target = new Date(p.target_date);
           const diffDays = Math.ceil((target - today) / (1000 * 60 * 60 * 24));
           const weeksLeft = Math.max(0, Math.ceil(diffDays / 7));
+          const isSelected = appState.active_plan && appState.active_plan.id === p.id;
+          const isArchived = p.status === 'archived';
+
+          let sportIcon = '🏃';
+          if (p.sport_type === 'cycling') sportIcon = '🚴';
+          else if (p.sport_type === 'triathlon') sportIcon = '🏊';
+
+          const cardBorder = isSelected ? 'border-teal-500/60 ring-1 ring-teal-500/40 bg-teal-950/20' : 'border-slate-800 bg-slate-950/60';
+          const goalTitle = p.goal_type.replace('_', ' ').toUpperCase();
 
           const item = document.createElement('div');
-          item.className = 'p-3 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between text-xs';
+          item.className = `p-3.5 rounded-xl border ${cardBorder} flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs transition`;
           item.innerHTML = `
-            <div class="flex items-center gap-3">
-              <span class="text-xl">🏃</span>
-              <div>
-                <div class="font-bold text-white text-sm">${p.goal_type.replace('_', ' ').toUpperCase()} (${p.sport_type})</div>
-                <div class="text-[11px] text-slate-400">Zieltag: ${p.target_date} · Basis ${p.base_weekly_volume} km/W</div>
+            <div class="flex items-start sm:items-center gap-3 min-w-0">
+              <span class="text-2xl shrink-0 p-1.5 rounded-lg bg-slate-900 border border-slate-800">${sportIcon}</span>
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="font-bold text-white text-sm truncate">${goalTitle} (${p.sport_type})</span>
+                  ${isSelected ? '<span class="px-2 py-0.5 rounded bg-teal-500/20 text-teal-300 font-bold text-[10px] shrink-0">AKTIV AUSGEWÄHLT</span>' : ''}
+                  ${isArchived ? '<span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-semibold text-[10px] shrink-0">📦 ARCHIVIERT</span>' : ''}
+                </div>
+                <div class="text-[11px] text-slate-400 mt-0.5">
+                  Zieltag: <strong class="text-slate-300 font-mono">${p.target_date}</strong> · Basis ${p.base_weekly_volume} km/W
+                </div>
               </div>
             </div>
-            <div class="text-right">
-              <div class="font-bold text-teal-400 font-mono text-sm">noch ${weeksLeft} W</div>
-              <div class="text-[10px] text-slate-500 font-mono">(${diffDays} Tage)</div>
+
+            <div class="flex items-center justify-between sm:justify-end gap-3 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-800/80">
+              <div class="text-left sm:text-right font-mono">
+                <div class="font-bold text-teal-400 text-sm">noch ${weeksLeft} W</div>
+                <div class="text-[10px] text-slate-500">(${diffDays} Tage)</div>
+              </div>
+
+              <div class="flex items-center gap-1.5">
+                ${!isSelected ? `
+                  <button onclick="onPlanSelect('${p.id}')" title="Als aktuellen Plan anzeigen" class="p-1.5 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium transition text-[11px]">
+                    Wählen
+                  </button>
+                ` : ''}
+
+                ${!isArchived ? `
+                  <button onclick="archivePlanAction('${p.id}')" title="Plan archivieren (pausieren)" class="p-1.5 px-2 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 transition text-[11px] flex items-center gap-1">
+                    <span>📦</span> <span class="hidden xs:inline">Archivieren</span>
+                  </button>
+                ` : `
+                  <button onclick="unarchivePlanAction('${p.id}')" title="Plan reaktivieren" class="p-1.5 px-2 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition text-[11px] flex items-center gap-1">
+                    <span>🌱</span> <span class="hidden xs:inline">Reaktivieren</span>
+                  </button>
+                `}
+
+                <button onclick="deletePlanAction('${p.id}', '${goalTitle}')" title="Plan endgültig löschen" class="p-1.5 px-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 transition text-[11px] flex items-center gap-1">
+                  <span>🗑️</span> <span class="hidden xs:inline">Löschen</span>
+                </button>
+              </div>
             </div>
           `;
           plansList.appendChild(item);
