@@ -94,7 +94,7 @@ schema_version:
   * resting_hr (INTEGER, nullable, Ruhepuls in bpm)
   * max_hr (INTEGER, nullable, Maximalpuls in bpm)
   * weight_kg (REAL, nullable)
-  * profile_json (TEXT, nullable — erweiterbare Stammdaten, z. B. `{"vdot": 42, "ftp_watts": 220, "swim_css_100m": "01:48"}`)
+  * profile_json (TEXT, nullable — erweiterbare Stammdaten, z. B. `{"vdot": 42, "ftp_watts": 220, "swim_css_100m": "01:48", "track_menstrual_cycle": true}`)
   * created_at (TEXT / ISO8601)
   * updated_at (TEXT / ISO8601)
 
@@ -102,9 +102,9 @@ schema_version:
   * id (TEXT/UUID, PK)
   * user_id (FK -> users.id)
   * sport_type (TEXT: 'running', 'cycling', 'swimming')
-  * zone_model (TEXT: 'daniels_vdot', 'coggan_ftp', 'hr_percentage')
-  * reference_value (REAL — z. B. VDOT 42, FTP 220, Max-HR 185)
-  * zones_json (TEXT — Array von Zonen, z. B. `[{"name": "easy", "min_pace": "05:50", "max_pace": "06:20"}, {"name": "threshold", "min_pace": "04:55", "max_pace": "05:05"}]`)
+  * zone_model (TEXT: 'daniels_vdot', 'coggan_ftp', 'hr_percentage', 'swim_css')
+  * reference_value (REAL — z. B. VDOT 42, FTP 220, CSS 1.45)
+  * zones_json (TEXT — Array von Zonen, z. B. `[{"name": "easy", "min_pace": "05:50", "max_pace": "06:20"}]`)
   * calculated_at (TEXT / ISO8601)
   * created_at (TEXT / ISO8601)
   * updated_at (TEXT / ISO8601)
@@ -112,12 +112,12 @@ schema_version:
 * **plans**:
   * id (TEXT/UUID, PK)
   * user_id (FK -> users.id)
-  * sport_type (TEXT, z. B. 'running', 'cycling', 'strength')
+  * sport_type (TEXT, z. B. 'running', 'cycling', 'strength', 'multisport')
   * goal_type (TEXT, z. B. 'marathon', '5k', 'ftp_builder')
   * start_date (TEXT / ISO8601 — erster Tag des Plans, explizit gesetzt)
   * target_date (TEXT / ISO8601)
-  * available_days (TEXT — JSON-Array verfügbarer Wochentage, z. B. `[2, 4, 6, 7]` für Di/Do/Sa/So)
-  * base_weekly_volume (REAL, z. B. 25.0 für Lauf-km, 180 für Rad-min)
+  * available_days (TEXT — JSON-Array verfügbarer Wochentage, z. B. `[2, 4, 6, 7]`)
+  * base_weekly_volume (REAL, z. B. 25.0 für Lauf-km, 180 für Rad-min, 350 für TSS)
   * sessions_per_week (INTEGER, z. B. 4)
   * key_workout_day (INTEGER, 1=Mo ... 7=So, z. B. Longrun-Tag)
   * status (TEXT: 'active', 'completed', 'aborted')
@@ -130,7 +130,8 @@ schema_version:
   * week_number (INTEGER, 1..N)
   * week_start_date (TEXT / ISO8601)
   * phase (TEXT: 'base', 'build', 'peak', 'taper')
-  * target_weekly_volume (REAL)
+  * target_weekly_volume (REAL — Primärmetrik)
+  * target_weekly_tss (REAL, nullable — Unified Load)
   * is_recovery_week (BOOLEAN)
   * created_at (TEXT / ISO8601)
   * updated_at (TEXT / ISO8601)
@@ -138,7 +139,7 @@ schema_version:
 * **workouts**:
   * id (TEXT/UUID, PK)
   * week_id (FK -> weeks.id)
-  * sport_type (TEXT — z. B. 'running', 'strength'; ermöglicht Multi-Sport-Tage innerhalb eines Plans)
+  * sport_type (TEXT — z. B. 'running', 'strength', 'cycling')
   * date (TEXT / ISO8601)
   * day_of_week (INTEGER, 1=Mo ... 7=So)
   * workout_type (TEXT: 'easy', 'long_run', 'tempo', 'interval', 'rest', 'strength_upper', 'strength_lower', 'cross_training')
@@ -206,9 +207,11 @@ Im CLI wird vor der Zuordnung eine Bestätigung angezeigt: *"Feedback für: Easy
 {
   "event_type": "workout_checkin",
   "completion_status": "partial",
+  "completion_reason": "time_constraint",
   "actual_metrics": {
     "metric_primary": 12.0,
     "unit": "km",
+    "tss": 85.4,
     "completed_units": null
   },
   "perceived_rpe": 8,
@@ -222,12 +225,13 @@ Im CLI wird vor der Zuordnung eine Bestätigung angezeigt: *"Feedback für: Easy
       "severity": 6
     }
   ],
-  "notes": "Musste bei km 12 abbrechen wegen Stechen im rechten Knie."
+  "notes": "Musste bei km 12 abbrechen, keine Zeit mehr. Leichtes Stechen im rechten Knie."
 }
 ```
+*(Anmerkung: `actual_metrics` ist sportartenspezifisch. Bei Radsport z.B. `"np_watts": 215, "tss": 120`, beim Schwimmen `"swolf": 38`)*
 
 ### C. Status-Update Parser
-* **System-Prompt Ziel:** Verarbeitet Zustandsänderungen ausserhalb von Workout-Check-ins (Genesungsmeldung, Schmerzupdate, Zielanderung).
+* **System-Prompt Ziel:** Verarbeitet Zustandsänderungen ausserhalb von Workout-Check-ins (Genesungsmeldung, Schmerzupdate, Zieländerung, Readiness/Schlaf).
 * **JSON-Schema:**
 ```json
 {
@@ -243,12 +247,11 @@ Im CLI wird vor der Zuordnung eine Bestätigung angezeigt: *"Feedback für: Easy
 ```json
 {
   "event_type": "status_update",
-  "update_type": "pain_update",
+  "update_type": "readiness_update",
   "details": {
-    "location": "knee_right",
-    "status": "improving",
-    "severity": 2,
-    "notes": "Knie nur noch leicht bei Treppen."
+    "factor": "sleep_deprivation",
+    "severity": 8,
+    "notes": "Jetlag aus Asien, habe letzte Nacht nur 3h geschlafen."
   }
 }
 ```
@@ -308,11 +311,12 @@ Die `RunningStrategy` berechnet Pace-Zonen nach Daniels' VDOT-Tabelle aus dem Us
 ```
 1. SICK       — Krankheit (höchste Priorität, überschreibt alles)
 2. PAIN       — Struktureller Schmerz (Gelenk, Sehne, Knochen)
-3. RPE_HIGH   — Übermässige Ermüdung (RPE >= 8 bei Easy-Workout)
-4. PARTIAL    — Teilweise absolviert
-5. MISSED     — Nicht absolviert (keine Aktion nötig, km verfallen)
-6. OVERPERFORMED — Mehr als geplant (keine Aktion, Plan bleibt)
-7. COMPLETED  — Planmässig absolviert (keine Mutation)
+3. FATIGUE    — Akute Erschöpfung / Jetlag / Schlafmangel
+4. RPE_HIGH   — Übermässige Ermüdung (RPE >= 8 bei Easy-Workout)
+5. PARTIAL    — Teilweise absolviert
+6. MISSED     — Nicht absolviert (keine Aktion nötig, km verfallen)
+7. OVERPERFORMED — Mehr als geplant (keine Aktion, Plan bleibt)
+8. COMPLETED  — Planmässig absolviert (keine Mutation)
 ```
 
 Bei mehreren gleichzeitigen Signalen (z. B. `SICK` + `PAIN`) greift die höchstpriorisierte Regel.
@@ -326,22 +330,27 @@ Bei mehreren gleichzeitigen Signalen (z. B. `SICK` + `PAIN`) greift die höchstp
   * Ab Tag 5: schrittweise Rückkehr zum regulären Plan.
 
 #### Regel 2: Symptom PAIN (Gelenk, Sehne, Fuß, Schienbein)
-* **Auslöser:** Check-in mit `symptoms[].type` in `['joint_pain', 'tendon_pain', 'shin_pain', 'bone_pain']` und `severity >= 4`.
+* **Auslöser:** Check-in mit `symptoms[].type` in `['joint_pain', 'tendon_pain', 'shin_pain', 'bone_pain']`.
 * **Aktion:**
-  * Mindestens 48–72 Stunden zwingende Trainingspause (Umwandlung in `rest`).
-  * Streichung von Tempo-/Intervalltraining für die laufende Woche.
-  * Bei `severity >= 7`: Pause bis expliziter Status-Update (`pain_update`, `status: 'resolved'` oder `status: 'improving'` mit `severity <= 3`).
+  * **Severity >= 4 (Echter Schmerz):** Mindestens 48–72 Stunden zwingende Trainingspause (Umwandlung in `rest`). Streichung von Tempo-/Intervalltraining für die laufende Woche. Bei `severity >= 7`: Pause bis expliziter Status-Update (`pain_update`, `status: 'resolved'`).
+  * **Severity 1-3 (Niggle):** Löst *keine* Trainingspause aus. Wird im UI als "Niggle" zur Beobachtung markiert. Die Engine ersetzt jedoch Tempo-Einheiten in den nächsten 48h durch Easy-Einheiten.
 * **Muskelschmerz (`type: 'muscle_soreness'`)** mit `severity < 6` löst keine Zwangspause aus (normaler Trainingsreiz).
 
-#### Regel 3: RPE-Überwachung
+#### Regel 3: FATIGUE / LOW READINESS
+* **Auslöser:** Status-Update `readiness_update` (z.B. Jetlag, Schlafmangel, extrem gestresst) mit `severity >= 7`.
+* **Aktion:** Nächste 48 Stunden: Umwandlung aller High-Intensity-Workouts (Tempo, Intervalle, Kraft Maximalkraft) in Active Recovery / Easy Workouts (Zone 1-2). Volumen bleibt erhalten, Intensität sinkt.
+
+#### Regel 4: RPE-Überwachung
 * **Auslöser:** Easy-Workout mit `perceived_rpe >= 8`.
 * **Aktion:** Reduktion des Volumens der Folgewoche um 15 %.
+* **Ausnahme (Female Cycle):** Wenn `track_menstrual_cycle: true` und der User sich in der späten Luteal- / frühen Menstruationsphase befindet (häufig höherer RPE/Puls), wird die RPE-Toleranz um +1 erhöht, bevor das Volumen reduziert wird.
 
-#### Regel 4: PARTIAL / MISSED
-* Verpasste Einheiten/Volumina verfallen ersatzlos.
-* Kein Erhöhen der Folgetage oder des nächsten Longruns.
+#### Regel 5: PARTIAL / MISSED
+* **Partial - Time Constraint:** Abbruch wegen Zeitmangel. Keine Aktion, verpasstes Volumen verfällt ersatzlos.
+* **Partial - Exhaustion:** Abbruch wegen Erschöpfung. Zählt als `RPE_HIGH` (Regel 4) und senkt das Volumen der Folgewoche.
+* **Missed:** Verpasste Einheiten verfallen. Kein Erhöhen der Folgetage oder des nächsten Longruns (Schutz vor "Aufhol-Verletzungen").
 
-#### Regel 5: OVERPERFORMED
+#### Regel 6: OVERPERFORMED
 * Keine automatische Steigerung der Folgetage; Plan läuft unverändert weiter.
 
 ### D. Replan-Konzept (Plan-Neugenerierung)
@@ -661,7 +670,9 @@ Bird's-Eye-View des gesamten Trainingsplans.
 #### Screen 5: Profil & Zonen
 Einstellungen und Leistungsdaten des Benutzers.
 - Persönliche Daten: Alter, Gewicht, Ruhepuls, Max-Puls.
-- Leistungswerte pro Sportart: VDOT (Laufen), FTP (Rad), 1RM-Werte (Kraft).
+- **Biomarker & Zyklen:** Option für Female Cycle Tracking (passt Engine-Sensitivität für RPE/HR an).
+- Leistungswerte pro Sportart: VDOT (Laufen), FTP (Rad), CSS (Schwimmen), 1RM-Werte (Kraft).
+- Historischer Verlauf: Graphische Darstellung der Baseline-Werte über die Zeit (z.B. FTP-Entwicklung).
 - Berechnete Zonen als Tabelle (Zonenname, Pace-/Watt-Bereich, HR-Bereich).
 - Button "Zonen neu berechnen" (nach neuem Wettkampf/Test).
 - Aktive Pläne: Liste mit Sport-Icon, Zielname und Countdown ("Marathon Zürich · noch 16 Wochen").
@@ -678,10 +689,12 @@ Für Phasen abseits normaler Check-ins.
 - Bei Krankheit: App aktiviert SICK-Modus, zeigt Timeline ("Krank seit Mo, 15.09. · Tag 3"), pausiert alle Workouts.
 - Bei Genesungsmeldung: App zeigt Rückkehrplan ("Erstes Workout auf 50 % reduziert, kein Tempo bis Freitag").
 - Schmerztagebuch: Täglicher Kurz-Check "Wie ist das Knie heute? (1–10)" mit Verlaufsgraph.
+- Readiness-Update: Erfassung von Schlafqualität, Stress oder Jetlag.
 
 #### Screen 8: Statistiken & Trends
 Langfristige Auswertung.
-- Wochenvolumen-Graph: Balkendiagramm Soll vs. Ist über den Planverlauf.
+- **Performance Management Chart (PMC):** Das Herzstück für Multi-Sport. Liniendiagramme für **CTL** (Chronic Training Load / Fitness, blau), **ATL** (Acute Training Load / Fatigue, pink) und **TSB** (Training Stress Balance / Form, gelb).
+- Wochenvolumen-Graph: Balkendiagramm Soll vs. Ist über den Planverlauf, inkl. TSS-Erreichung.
 - RPE-Trend: Liniengraph der durchschnittlichen RPE pro Woche (Frühwarnung bei steigendem Trend).
 - Consistency Score: Prozent der absolvierten Workouts (motivierend, aber ohne Gamification-Druck).
 - Symptom-History: Zeitstrahl mit Schmerz-/Krankheitsereignissen.
