@@ -1,0 +1,19 @@
+[project]
+name = "omnitrain"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.5",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "rich>=15.0.0",
+    "typer>=0.27.2",
+    "uvicorn>=0.53.0",
+]
+
+[project.scripts]
+omnitrain = "omnitrain.cli.main:main"
