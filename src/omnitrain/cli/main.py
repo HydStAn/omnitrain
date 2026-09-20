@@ -35,6 +35,18 @@ def get_db() -> Database:
     return db
 
 
+def get_volume_unit(sport_type: str) -> str:
+    mapping = {
+        "running": "km",
+        "swimming": "m",
+        "strength": "Sätze",
+        "cycling": "min",
+        "triathlon": "Einheiten",
+        "multisport": "Einheiten",
+    }
+    return mapping.get(sport_type, "units")
+
+
 def get_or_create_default_user(db: Database) -> str:
     with db.get_connection() as conn:
         row = conn.execute("SELECT id FROM users LIMIT 1;").fetchone()
@@ -90,7 +102,7 @@ def status():
         grid.add_column(justify="right")
         grid.add_row(
             f"Zieltermin: [bold]{plan_row['target_date']}[/bold]",
-            f"Basisvolumen: [bold]{plan_row['base_weekly_volume']} {plan_row['sport_type'] == 'running' and 'km' or 'units'}[/bold]"
+            f"Basisvolumen: [bold]{plan_row['base_weekly_volume']} {get_volume_unit(plan_row['sport_type'])}[/bold]"
         )
         if latest_pmc:
             tsb_color = "green" if latest_pmc.tsb >= 0 else "yellow"
@@ -211,7 +223,7 @@ def plan_show():
                 f"Woche {w['week_number']}",
                 w["week_start_date"],
                 f"[{phase_color}]{w['phase'].upper()}[/{phase_color}]",
-                f"{w['target_weekly_volume']} {plan_row['sport_type'] == 'running' and 'km' or 'units'}",
+                f"{w['target_weekly_volume']} {get_volume_unit(plan_row['sport_type'])}",
                 f"{w['target_weekly_tss'] or '-'}",
                 recovery_badge
             )

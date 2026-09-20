@@ -756,8 +756,8 @@ def index():
         <div class="my-3">
           <h2 id="today-workout-title" class="text-xl sm:text-2xl font-bold tracking-tight text-white mb-1 truncate">Dauerlauf</h2>
           <div class="flex flex-wrap items-baseline gap-2">
-            <span id="today-metric" class="font-mono text-2xl sm:text-3xl font-extrabold text-teal-400">-- km</span>
-            <span id="today-intensity" class="text-xs sm:text-sm font-mono text-slate-300">Pace: --:-- min/km</span>
+            <span id="today-metric" class="font-mono text-2xl sm:text-3xl font-extrabold text-teal-400">--</span>
+            <span id="today-intensity" class="text-xs sm:text-sm font-mono text-slate-300"></span>
           </div>
         </div>
 
@@ -822,7 +822,7 @@ def index():
           <span id="carousel-phase-badge" class="px-2 py-0.5 rounded bg-teal-500/20 text-teal-300 font-bold uppercase tracking-wider text-[10px] shrink-0">BUILD</span>
           <span id="carousel-meso-text" class="text-slate-300 truncate">Woche vor Deload</span>
         </div>
-        <div class="font-mono font-bold text-slate-200 shrink-0 ml-2" id="carousel-volume-text">36.0 km</div>
+        <div class="font-mono font-bold text-slate-200 shrink-0 ml-2" id="carousel-volume-text">--</div>
       </div>
 
       <!-- 7 Day Workout Cards Carousel -->
@@ -842,7 +842,7 @@ def index():
       <section class="glass-card rounded-2xl p-3.5 sm:p-4 border border-slate-800/80">
         <div class="flex justify-between items-center mb-2">
           <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Wöchentliche Volumen-Kurve</span>
-          <span class="text-[10px] text-teal-400 font-mono">Volumen (km)</span>
+          <span id="macro-volume-unit-label" class="text-[10px] text-teal-400 font-mono">Volumen</span>
         </div>
         <div class="h-36 w-full relative">
           <canvas id="macroVolumeChart"></canvas>
@@ -1130,6 +1130,29 @@ def index():
     let activeCarouselWeekIndex = 0;
     let pendingPlanParams = null;
 
+    function getSportVolumeUnit(sport, isWeeklyRate = false) {
+      if (sport === 'swimming') return isWeeklyRate ? 'm/W' : 'm';
+      if (sport === 'strength') return isWeeklyRate ? 'Sätze/W' : 'Sätze';
+      if (sport === 'cycling') return isWeeklyRate ? 'min/W' : 'min';
+      if (sport === 'triathlon' || sport === 'multisport') return isWeeklyRate ? 'Einh./W' : 'Einh.';
+      return isWeeklyRate ? 'km/W' : 'km';
+    }
+
+    function formatSportVolume(volume, sport, isWeeklyRate = false) {
+      if (volume === undefined || volume === null) return '-';
+      const num = (volume % 1 === 0) ? volume : Number(volume.toFixed(1));
+      const unit = getSportVolumeUnit(sport, isWeeklyRate);
+      return `${num} ${unit}`;
+    }
+
+    function formatWorkoutMetric(value, unit) {
+      if (value === undefined || value === null) return '';
+      const num = (value % 1 === 0) ? value : Number(value.toFixed(1));
+      let u = unit || '';
+      if (u === 'sets') u = 'Sätze';
+      return `${num} ${u}`.trim();
+    }
+
     async function loadState(planId = null) {
       try {
         let url = `/api/state?show_archived=${showArchivedPlans ? 'true' : 'false'}`;
@@ -1261,7 +1284,7 @@ def index():
       const tw = appState.today_workout;
       if (tw) {
         document.getElementById('today-workout-title').innerText = tw.workout_type.replace('_', ' ').toUpperCase();
-        document.getElementById('today-metric').innerText = tw.metric_primary > 0 ? `${tw.metric_primary} ${tw.metric_unit}` : 'Regeneration';
+        document.getElementById('today-metric').innerText = tw.metric_primary > 0 ? formatWorkoutMetric(tw.metric_primary, tw.metric_unit) : 'Regeneration';
         document.getElementById('today-intensity').innerText = tw.intensity_detail || tw.intensity_target || '';
         document.getElementById('today-date').innerText = tw.date;
         document.getElementById('today-status').innerText = tw.status.toUpperCase();
@@ -1375,7 +1398,7 @@ def index():
         let dotColor = 'bg-slate-700';
         let statusText = 'Rest';
         if (wo) {
-          statusText = `${wo.metric_primary}${wo.metric_unit}`;
+          statusText = formatWorkoutMetric(wo.metric_primary, wo.metric_unit);
           if (wo.status === 'completed') dotColor = 'bg-emerald-400';
           else if (wo.workout_type === 'rest') dotColor = 'bg-rose-500';
           else dotColor = 'bg-teal-400 ring-2 ring-teal-500/20';
@@ -1408,7 +1431,8 @@ def index():
         curWeek.phase === 'build' ? 'bg-orange-500/20 text-orange-300' : 'bg-blue-500/20 text-blue-300'
       }`;
       document.getElementById('carousel-meso-text').innerText = curWeek.is_recovery_week ? '🌿 Entlastungswoche (-25%)' : 'Belastungswoche';
-      document.getElementById('carousel-volume-text').innerText = `${curWeek.target_weekly_volume} km`;
+      const curSport = appState.active_plan ? appState.active_plan.sport_type : 'running';
+      document.getElementById('carousel-volume-text').innerText = formatSportVolume(curWeek.target_weekly_volume, curSport);
 
       // Filter workouts of this week
       const weekWorkouts = appState.workouts.filter(w => w.week_id === curWeek.id);
@@ -1449,7 +1473,7 @@ def index():
                 <span class="text-[10px] font-mono text-slate-500 shrink-0">${wo ? wo.date : ''}</span>
               </div>
               <div class="text-slate-400 mt-0.5 truncate">
-                ${wo ? (wo.workout_type === 'rest' ? 'Regeneration' : `${wo.workout_type.toUpperCase()} · ${wo.metric_primary} ${wo.metric_unit}`) : 'Ruhetag'}
+                ${wo ? (wo.workout_type === 'rest' ? 'Regeneration' : `${wo.workout_type.toUpperCase()} · ${formatWorkoutMetric(wo.metric_primary, wo.metric_unit)}`) : 'Ruhetag'}
                 ${wo && wo.intensity_detail ? `<span class="text-slate-500 block text-[11px] italic truncate">${wo.intensity_detail}</span>` : ''}
               </div>
             </div>
@@ -1478,6 +1502,13 @@ def index():
     function renderMakrozyklus() {
       if (!appState.weeks) return;
 
+      const curSport = appState.active_plan ? appState.active_plan.sport_type : 'running';
+      const volUnit = getSportVolumeUnit(curSport);
+      const unitBadge = document.getElementById('macro-volume-unit-label');
+      if (unitBadge) {
+        unitBadge.innerText = `Volumen (${volUnit})`;
+      }
+
       // 1. Chart.js Macro Volume Wave Curve
       const ctx = document.getElementById('macroVolumeChart');
       if (ctx) {
@@ -1493,7 +1524,7 @@ def index():
           data: {
             labels: labels,
             datasets: [{
-              label: 'Wochenvolumen (km)',
+              label: `Wochenvolumen (${volUnit})`,
               data: dataV,
               backgroundColor: appState.weeks.map(w => {
                 if (w.is_recovery_week) return 'rgba(251, 191, 36, 0.4)'; // Amber
@@ -1549,7 +1580,7 @@ def index():
             </div>
           </div>
           <div class="font-mono font-bold text-slate-200 shrink-0 ml-2">
-            ${w.target_weekly_volume} km
+            ${formatSportVolume(w.target_weekly_volume, curSport)}
           </div>
         `;
         container.appendChild(item);
@@ -1648,7 +1679,9 @@ def index():
 
           let sportIcon = '🏃';
           if (p.sport_type === 'cycling') sportIcon = '🚴';
-          else if (p.sport_type === 'triathlon') sportIcon = '🏊';
+          else if (p.sport_type === 'swimming') sportIcon = '🏊';
+          else if (p.sport_type === 'strength') sportIcon = '🏋️';
+          else if (p.sport_type === 'triathlon' || p.sport_type === 'multisport') sportIcon = '🏊';
 
           const cardBorder = isSelected ? 'border-teal-500/60 ring-1 ring-teal-500/40 bg-teal-950/20' : 'border-slate-800 bg-slate-950/60';
           const goalTitle = p.goal_type.replace('_', ' ').toUpperCase();
@@ -1665,7 +1698,7 @@ def index():
                   ${isArchived ? '<span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-semibold text-[10px] shrink-0">📦 ARCHIVIERT</span>' : ''}
                 </div>
                 <div class="text-[11px] text-slate-400 mt-0.5">
-                  Zieltag: <strong class="text-slate-300 font-mono">${p.target_date}</strong> · Basis ${p.base_weekly_volume} km/W
+                  Zieltag: <strong class="text-slate-300 font-mono">${p.target_date}</strong> · Basis ${formatSportVolume(p.base_weekly_volume, p.sport_type, true)}
                 </div>
               </div>
             </div>
@@ -1859,9 +1892,9 @@ def index():
               <div class="p-2.5 rounded-xl bg-slate-950/80 border border-slate-700/80 text-xs flex flex-col gap-1.5">
                 <span class="font-mono text-slate-400 font-semibold text-[11px]">${d.date}</span>
                 <div class="flex flex-wrap items-center gap-1.5">
-                  <span class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-300 line-through text-[11px]">${d.before.workout_type.toUpperCase()} · ${d.before.metric_primary}${d.before.metric_unit}</span>
+                  <span class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-300 line-through text-[11px]">${d.before.workout_type.toUpperCase()} · ${formatWorkoutMetric(d.before.metric_primary, d.before.metric_unit)}</span>
                   <span class="text-slate-500">→</span>
-                  <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold text-[11px]">${d.after.workout_type.toUpperCase()} · ${d.after.metric_primary}${d.after.metric_unit}</span>
+                  <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold text-[11px]">${d.after.workout_type.toUpperCase()} · ${formatWorkoutMetric(d.after.metric_primary, d.after.metric_unit)}</span>
                 </div>
                 ${d.after.intensity_detail ? `<span class="text-[10px] text-slate-400 italic break-words">${d.after.intensity_detail}</span>` : ''}
               </div>
@@ -1914,9 +1947,9 @@ def index():
               <div class="p-2.5 rounded-xl bg-slate-950/80 border border-slate-700/80 text-xs flex flex-col gap-1.5">
                 <span class="font-mono text-slate-400 font-semibold text-[11px]">${d.date}</span>
                 <div class="flex flex-wrap items-center gap-1.5">
-                  <span class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-300 line-through text-[11px]">${d.before.workout_type.toUpperCase()} · ${d.before.metric_primary}${d.before.metric_unit}</span>
+                  <span class="px-2 py-0.5 rounded bg-rose-500/10 text-rose-300 line-through text-[11px]">${d.before.workout_type.toUpperCase()} · ${formatWorkoutMetric(d.before.metric_primary, d.before.metric_unit)}</span>
                   <span class="text-slate-500">→</span>
-                  <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold text-[11px]">${d.after.workout_type.toUpperCase()} · ${d.after.metric_primary}${d.after.metric_unit}</span>
+                  <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold text-[11px]">${d.after.workout_type.toUpperCase()} · ${formatWorkoutMetric(d.after.metric_primary, d.after.metric_unit)}</span>
                 </div>
                 ${d.after.intensity_detail ? `<span class="text-[10px] text-slate-400 italic break-words">${d.after.intensity_detail}</span>` : ''}
               </div>
