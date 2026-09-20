@@ -100,3 +100,90 @@ def test_offline_fallback_parser_without_llm():
     # Test 3: Skipped workout
     c3 = parser.parse("Wegen Überstunden ist das Training heute ausgefallen.")
     assert c3.completion_status == CompletionStatus.SKIPPED
+
+
+def test_multisport_checkin_parsing_offline():
+    parser = CheckinParser(llm_client=None)
+
+    # 1. Swim check-in with meters and shoulder pain
+    c_swim = parser.parse("Heute 2500m geschwommen, aber Schulterschmerzen gehabt bei RPE 6.")
+    assert c_swim.completion_status == CompletionStatus.COMPLETED
+    assert c_swim.actual_metrics is not None
+    assert c_swim.actual_metrics.metric_primary == 2500.0
+    assert c_swim.actual_metrics.unit == "m"
+    assert c_swim.perceived_rpe == 6
+    assert len(c_swim.symptoms) == 1
+    assert c_swim.symptoms[0].location == "shoulder"
+
+    # 2. Strength check-in with sets and elbow pain
+    c_str = parser.parse("15 Sätze absolviert, aber leichter Schmerz im Ellbogen.")
+    assert c_str.completion_status == CompletionStatus.COMPLETED
+    assert c_str.actual_metrics is not None
+    assert c_str.actual_metrics.metric_primary == 15.0
+    assert c_str.actual_metrics.unit == "sets"
+    assert len(c_str.symptoms) == 1
+    assert c_str.symptoms[0].location == "elbow"
+
+    # 3. Cycling check-in with minutes and back pain
+    c_bike = parser.parse("90 min geradelt, RPE 5, aber Rückenschmerzen gehabt.")
+    assert c_bike.completion_status == CompletionStatus.COMPLETED
+    assert c_bike.actual_metrics is not None
+    assert c_bike.actual_metrics.metric_primary == 90.0
+    assert c_bike.actual_metrics.unit == "min"
+    assert c_bike.perceived_rpe == 5
+    assert len(c_bike.symptoms) == 1
+    assert c_bike.symptoms[0].location == "back"
+
+
+def test_multisport_reconciler_niggle_demotions():
+    today = date(2026, 10, 6)
+    niggle_checkin = CheckinEvent(
+        completion_status=CompletionStatus.COMPLETED,
+        symptoms=[Symptom(location="shoulder", type="tendon_pain", severity=2)]
+    )
+
+    # Swimming demotion: css_threshold -> technique_drills
+    swim_wo = Workout(
+        id="s1",
+        week_id="w1",
+        sport_type=SportType.SWIMMING,
+        date=date(2026, 10, 7),
+        day_of_week=3,
+        workout_type="css_threshold",
+        metric_primary=2000.0,
+        metric_unit="m",
+        status=CompletionStatus.PLANNED
+    )
+    StateMachineReconciler.reconcile_checkin(niggle_checkin, today, [swim_wo])
+    assert swim_wo.workout_type == "technique_drills"
+
+    # Cycling demotion: sweetspot -> recovery
+    bike_wo = Workout(
+        id="b1",
+        week_id="w1",
+        sport_type=SportType.CYCLING,
+        date=date(2026, 10, 7),
+        day_of_week=3,
+        workout_type="sweetspot",
+        metric_primary=60.0,
+        metric_unit="min",
+        status=CompletionStatus.PLANNED
+    )
+    StateMachineReconciler.reconcile_checkin(niggle_checkin, today, [bike_wo])
+    assert bike_wo.workout_type == "recovery"
+
+    # Strength demotion: strength -> hypertrophy
+    str_wo = Workout(
+        id="st1",
+        week_id="w1",
+        sport_type=SportType.STRENGTH,
+        date=date(2026, 10, 7),
+        day_of_week=3,
+        workout_type="strength",
+        metric_primary=15.0,
+        metric_unit="sets",
+        status=CompletionStatus.PLANNED
+    )
+    StateMachineReconciler.reconcile_checkin(niggle_checkin, today, [str_wo])
+    assert str_wo.workout_type == "hypertrophy"
+

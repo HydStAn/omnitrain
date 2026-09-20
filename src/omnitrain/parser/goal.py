@@ -149,11 +149,44 @@ Text: {text}"""
         if weeks_match:
             weeks = int(weeks_match.group(1))
 
-        # Baseline volume
-        baseline = 25.0
-        base_match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:km|kilometer)(?:\s*(?:pro|die|\/)\s*woche|\s*wöchentlich|\s*aktuell)?", lower)
-        if base_match:
-            baseline = float(base_match.group(1).replace(",", "."))
+        # Baseline volume according to sport
+        km_match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:km|kilometer)(?:\s*(?:pro|die|\/)\s*woche|\s*wöchentlich|\s*aktuell)?", lower)
+        m_match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:m|meter)(?:\s*(?:pro|die|\/)\s*woche|\s*wöchentlich|\s*aktuell)?", lower)
+        sets_match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:sätze|saetze|sets)(?:\s*(?:pro|die|\/)\s*woche|\s*wöchentlich|\s*aktuell)?", lower)
+        tss_match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:tss)(?:\s*(?:pro|die|\/)\s*woche|\s*wöchentlich|\s*aktuell)?", lower)
+
+        if sport == "swimming":
+            if m_match:
+                baseline = float(m_match.group(1).replace(",", "."))
+            elif km_match:
+                baseline = float(km_match.group(1).replace(",", ".")) * 1000.0
+            else:
+                baseline = 4000.0
+            base_unit = "m_per_week"
+        elif sport == "strength":
+            if sets_match:
+                baseline = float(sets_match.group(1).replace(",", "."))
+            else:
+                baseline = 14.0
+            base_unit = "sets_per_week"
+        elif sport == "cycling":
+            if tss_match:
+                baseline = float(tss_match.group(1).replace(",", "."))
+            else:
+                baseline = 250.0
+            base_unit = "tss_per_week"
+        elif sport == "triathlon":
+            if tss_match:
+                baseline = float(tss_match.group(1).replace(",", "."))
+            else:
+                baseline = 350.0
+            base_unit = "tss_per_week"
+        else:
+            if km_match:
+                baseline = float(km_match.group(1).replace(",", "."))
+            else:
+                baseline = 25.0
+            base_unit = "km_per_week"
 
         # Sessions per week
         sessions = 4
@@ -202,7 +235,7 @@ Text: {text}"""
             sport_type=sport,
             target_event=goal,
             target_weeks=weeks,
-            current_baseline=BaselineVolume(value=baseline, unit="km_per_week" if sport == "running" else "units"),
+            current_baseline=BaselineVolume(value=baseline, unit=base_unit),
             sessions_per_week=sessions,
             preferred_days=preferred_days,
             key_session_day=preferred_days[-1] if preferred_days else 7,

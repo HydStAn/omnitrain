@@ -26,3 +26,27 @@ def test_goal_parser_cycling():
     assert res.target_event == "ftp_builder"
     assert res.target_weeks == 12
     assert res.sessions_per_week == 4
+
+
+def test_goal_parser_swimming():
+    parser = GoalParser(ollama_url="http://127.0.0.1:99999")
+    text = "Ich will 10 Wochen Schwimmen trainieren, aktuell schwimme ich ca. 3500 m pro Woche an Mo, Mi, Fr."
+    res = parser.parse(text)
+
+    assert res.sport_type == "swimming"
+    assert res.target_weeks == 10
+    assert res.current_baseline.value == 3500.0
+    assert res.current_baseline.unit == "m_per_week"
+    assert res.preferred_days == [1, 3, 5]
+
+
+def test_goal_parser_strength():
+    parser = GoalParser(ollama_url="http://127.0.0.1:99999")
+    text = "Ich starte einen 8 Wochen Hypertrophie Krafttraining Plan mit 16 Sätze pro Woche."
+    res = parser.parse(text)
+
+    assert res.sport_type == "strength"
+    assert res.target_weeks == 8
+    assert res.current_baseline.value == 16.0
+    assert res.current_baseline.unit == "sets_per_week"
+

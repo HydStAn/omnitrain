@@ -172,7 +172,7 @@ def zones():
             if "min_pace" in z:
                 target = f"{z.get('min_pace')} – {z.get('max_pace')} min/km"
             elif "pace" in z:
-                target = f"{z.get('pace')} min/km"
+                target = f"{z.get('pace')} min/100m" if sport == "swimming" else f"{z.get('pace')} min/km"
             elif "min_watts" in z:
                 target = f"{z.get('min_watts')} – {z.get('max_watts') or 'max'} W"
             elif "intensity" in z:
@@ -277,7 +277,94 @@ def plan_new(
     console.print(f"[bold cyan]Generiere {weeks_count}-Wochen {goal.title()}-Plan ({sport})...[/bold cyan]")
 
     with db.get_connection() as conn:
-        # Save Plan record
+        # Determine sport-specific defaults if not explicitly configured
+        if sport == "swimming":
+            effective_base = baseline_volume if baseline_volume > 500 else 4000.0
+            effective_days = [1, 3, 5]
+            effective_sessions = 3
+            strat = SwimStrategy()
+            css_val = 105.0  # 1:45/100m default
+            weeks = strat.generate_plan(
+                plan_id=plan_id,
+                start_date=start_date,
+                target_date=target_date,
+                base_weekly_volume=effective_base,
+                available_days=effective_days,
+                reference_value=css_val,
+                sessions_per_week=effective_sessions
+            )
+            zones = strat.calculate_zones(css_val)
+            zone_model = "swim_css"
+            ref_val = css_val
+        elif sport == "strength":
+            effective_base = baseline_volume if baseline_volume <= 40 else 14.0
+            effective_days = [1, 3, 5]
+            effective_sessions = 3
+            strat = StrengthStrategy()
+            weeks = strat.generate_plan(
+                plan_id=plan_id,
+                start_date=start_date,
+                target_date=target_date,
+                base_weekly_volume=effective_base,
+                available_days=effective_days,
+                reference_value=100.0,
+                sessions_per_week=effective_sessions
+            )
+            zones = strat.calculate_zones(100.0)
+            zone_model = "strength_dup"
+            ref_val = 100.0
+        elif sport == "cycling":
+            effective_base = baseline_volume if baseline_volume > 50 else 250.0
+            effective_days = [2, 4, 6, 7]
+            effective_sessions = 4
+            strat = CyclingStrategy()
+            ftp_val = vdot if vdot > 100 else 220.0
+            weeks = strat.generate_plan(
+                plan_id=plan_id,
+                start_date=start_date,
+                target_date=target_date,
+                base_weekly_volume=effective_base,
+                available_days=effective_days,
+                reference_value=ftp_val,
+                sessions_per_week=effective_sessions
+            )
+            zones = strat.calculate_zones(ftp_val)
+            zone_model = "coggan_ftp"
+            ref_val = ftp_val
+        elif sport in ["triathlon", "multisport"]:
+            effective_base = baseline_volume if baseline_volume > 100 else 350.0
+            effective_days = [1, 2, 3, 4, 5, 6, 7]
+            effective_sessions = 5
+            weeks = TriathlonStrategy.generate_plan(
+                plan_id=plan_id,
+                start_date=start_date,
+                target_date=target_date,
+                base_weekly_volume=effective_base,
+                available_days=effective_days,
+                limiter="swim",
+                target_event=goal if "triathlon" in goal else "triathlon_olympic"
+            )
+            zones = get_daniels_zones(vdot)
+            zone_model = "triathlon_hybrid"
+            ref_val = vdot
+        else:  # running
+            effective_base = baseline_volume
+            effective_days = [2, 4, 6, 7]
+            effective_sessions = 4
+            weeks = RunningStrategy.generate_plan(
+                plan_id=plan_id,
+                start_date=start_date,
+                target_date=target_date,
+                base_weekly_volume=effective_base,
+                available_days=effective_days,
+                vdot=vdot,
+                sessions_per_week=effective_sessions
+            )
+            zones = get_daniels_zones(vdot)
+            zone_model = "daniels_vdot"
+            ref_val = vdot
+
+        # Save Plan record with effective parameters
         conn.execute(
             """
             INSERT INTO plans (
@@ -288,95 +375,9 @@ def plan_new(
             """,
             (
                 plan_id, user_id, sport, goal, start_date.isoformat(), target_date.isoformat(),
-                json.dumps([2, 4, 6, 7]), baseline_volume, 4, 7, now, now
+                json.dumps(effective_days), effective_base, effective_sessions, effective_days[-1], now, now
             )
         )
-
-        # Generate weeks & workouts via domain strategy
-        if sport == "running":
-            weeks = RunningStrategy.generate_plan(
-                plan_id=plan_id,
-                start_date=start_date,
-                target_date=target_date,
-                base_weekly_volume=baseline_volume,
-                available_days=[2, 4, 6, 7],
-                vdot=vdot,
-                sessions_per_week=4
-            )
-            zones = get_daniels_zones(vdot)
-            zone_model = "daniels_vdot"
-            ref_val = vdot
-        elif sport == "cycling":
-            strat = CyclingStrategy()
-            ftp_val = vdot if vdot > 100 else 220.0
-            weeks = strat.generate_plan(
-                plan_id=plan_id,
-                start_date=start_date,
-                target_date=target_date,
-                base_weekly_volume=baseline_volume if baseline_volume > 50 else 250.0,
-                available_days=[2, 4, 6, 7],
-                reference_value=ftp_val,
-                sessions_per_week=4
-            )
-            zones = strat.calculate_zones(ftp_val)
-            zone_model = "coggan_ftp"
-            ref_val = ftp_val
-        elif sport == "swimming":
-            strat = SwimStrategy()
-            css_val = 105.0  # 1:45/100m default
-            weeks = strat.generate_plan(
-                plan_id=plan_id,
-                start_date=start_date,
-                target_date=target_date,
-                base_weekly_volume=baseline_volume if baseline_volume > 500 else 4000.0,
-                available_days=[1, 3, 5],
-                reference_value=css_val,
-                sessions_per_week=3
-            )
-            zones = strat.calculate_zones(css_val)
-            zone_model = "swim_css"
-            ref_val = css_val
-        elif sport == "strength":
-            strat = StrengthStrategy()
-            weeks = strat.generate_plan(
-                plan_id=plan_id,
-                start_date=start_date,
-                target_date=target_date,
-                base_weekly_volume=baseline_volume if baseline_volume <= 40 else 14.0,
-                available_days=[1, 3, 5],
-                reference_value=100.0,
-                sessions_per_week=3
-            )
-            zones = strat.calculate_zones(100.0)
-            zone_model = "strength_dup"
-            ref_val = 100.0
-        elif sport in ["triathlon", "multisport"]:
-            weeks = TriathlonStrategy.generate_plan(
-                plan_id=plan_id,
-                start_date=start_date,
-                target_date=target_date,
-                base_weekly_volume=baseline_volume if baseline_volume > 100 else 350.0,
-                available_days=[1, 2, 3, 4, 5, 6, 7],
-                limiter="swim",
-                target_event=goal if "triathlon" in goal else "triathlon_olympic"
-            )
-            zones = get_daniels_zones(vdot)
-            zone_model = "triathlon_hybrid"
-            ref_val = vdot
-        else:
-            # Fallback to running
-            weeks = RunningStrategy.generate_plan(
-                plan_id=plan_id,
-                start_date=start_date,
-                target_date=target_date,
-                base_weekly_volume=baseline_volume,
-                available_days=[2, 4, 6, 7],
-                vdot=vdot,
-                sessions_per_week=4
-            )
-            zones = get_daniels_zones(vdot)
-            zone_model = "daniels_vdot"
-            ref_val = vdot
 
         # Persist Training Zones
         zone_id = str(uuid.uuid4())
@@ -484,7 +485,7 @@ def checkin(
                     # Check luteal phase simulation or day
                     is_luteal = prof.get("is_luteal_phase", False)
             except Exception:
-                pass
+                pass  # nosec B110
 
         upcoming_rows = conn.execute(
             """
@@ -662,8 +663,20 @@ def replan(
             return
 
         plan_id = plan_row["id"]
+        sport_type = plan_row["sport_type"]
+        goal_type = plan_row["goal_type"]
         target = date.fromisoformat(new_target_date) if new_target_date else date.fromisoformat(plan_row["target_date"])
-        vdot = new_vdot or 45.0
+
+        # Fetch reference value for this sport
+        zone_row = conn.execute(
+            "SELECT reference_value FROM training_zones WHERE user_id = ? AND sport_type = ? ORDER BY calculated_at DESC LIMIT 1;",
+            (plan_row["user_id"], sport_type)
+        ).fetchone()
+        ref_val = new_vdot or (zone_row["reference_value"] if zone_row else 45.0)
+
+        # Parse available days
+        days = json.loads(plan_row["available_days"]) if plan_row["available_days"] else None
+        sessions = plan_row["sessions_per_week"]
 
         # Delete future planned weeks and workouts
         conn.execute(
@@ -679,12 +692,16 @@ def replan(
             (plan_id, today.isoformat())
         )
 
-        new_weeks = ReplanEngine.replan_running(
+        new_weeks = ReplanEngine.replan(
             plan_id=plan_id,
+            sport_type=sport_type,
+            goal_type=goal_type,
             current_date=today,
             target_date=target,
-            vdot=vdot,
-            last_achieved_weekly_volume=float(plan_row["base_weekly_volume"])
+            reference_value=ref_val,
+            last_achieved_weekly_volume=float(plan_row["base_weekly_volume"]),
+            available_days=days,
+            sessions_per_week=sessions
         )
 
         for w in new_weeks:

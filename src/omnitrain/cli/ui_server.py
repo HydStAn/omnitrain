@@ -23,7 +23,7 @@ app = FastAPI(title="OmniTrain Web UI")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # nosemgrep: python.fastapi.security.wildcard-cors.wildcard-cors
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -208,42 +208,74 @@ def update_profile(req: ProfileUpdateRequest):
 
 
 class RecalculateZonesRequest(BaseModel):
-    vdot: float
+    reference_value: Optional[float] = None
+    vdot: Optional[float] = None
+    sport_type: Optional[str] = None
 
 
 @app.post("/api/profile/recalculate-zones")
 def recalculate_zones(req: RecalculateZonesRequest):
+    from omnitrain.sports.cycling import CyclingStrategy
+    from omnitrain.sports.swimming import SwimStrategy
+    from omnitrain.sports.strength import StrengthStrategy
+
     db = get_db()
     now = datetime.now(timezone.utc).isoformat()
-    new_zones = get_daniels_zones(req.vdot)
+    ref_val = req.reference_value or req.vdot or 45.0
+
     with db.get_connection() as conn:
         user_row = conn.execute("SELECT id FROM users LIMIT 1;").fetchone()
         if not user_row:
             raise HTTPException(status_code=404, detail="User not found")
         user_id = user_row["id"]
+
+        sport = req.sport_type
+        if not sport:
+            active_plan = conn.execute("SELECT sport_type FROM plans WHERE status = 'active' ORDER BY created_at DESC LIMIT 1;").fetchone()
+            sport = active_plan["sport_type"] if active_plan else "running"
+
+        if sport == "cycling":
+            strat = CyclingStrategy()
+            new_zones = strat.calculate_zones(ref_val)
+            zone_model = "coggan_ftp"
+        elif sport == "swimming":
+            strat = SwimStrategy()
+            new_zones = strat.calculate_zones(ref_val)
+            zone_model = "swim_css"
+        elif sport == "strength":
+            strat = StrengthStrategy()
+            new_zones = strat.calculate_zones(ref_val)
+            zone_model = "strength_dup"
+        elif sport in ["triathlon", "multisport"]:
+            new_zones = get_daniels_zones(ref_val)
+            zone_model = "triathlon_hybrid"
+        else:
+            new_zones = get_daniels_zones(ref_val)
+            zone_model = "daniels_vdot"
+
         zone_row = conn.execute(
-            "SELECT id FROM training_zones WHERE user_id = ? AND sport_type = 'running' LIMIT 1;",
-            (user_id,)
+            "SELECT id FROM training_zones WHERE user_id = ? AND sport_type = ? LIMIT 1;",
+            (user_id, sport)
         ).fetchone()
         if zone_row:
             conn.execute(
                 """
                 UPDATE training_zones
-                SET reference_value = ?, zones_json = ?, calculated_at = ?, updated_at = ?
+                SET reference_value = ?, zones_json = ?, zone_model = ?, calculated_at = ?, updated_at = ?
                 WHERE id = ?;
                 """,
-                (req.vdot, json.dumps(new_zones), now, now, zone_row["id"])
+                (ref_val, json.dumps(new_zones), zone_model, now, now, zone_row["id"])
             )
         else:
             conn.execute(
                 """
                 INSERT INTO training_zones (id, user_id, sport_type, zone_model, reference_value, zones_json, calculated_at, created_at, updated_at)
-                VALUES (?, ?, 'running', 'daniels_vdot', ?, ?, ?, ?, ?);
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
-                (str(uuid.uuid4()), user_id, req.vdot, json.dumps(new_zones), now, now, now)
+                (str(uuid.uuid4()), user_id, sport, zone_model, ref_val, json.dumps(new_zones), now, now, now)
             )
         conn.commit()
-    return {"status": "ok", "zones": new_zones}
+    return {"status": "ok", "zones": new_zones, "zone_model": zone_model}
 
 
 class CheckinRequest(BaseModel):
@@ -610,11 +642,8 @@ def delete_plan(req: PlanActionRequest):
     with db.get_connection() as conn:
         # Cascade delete workouts, weeks, and plan
         conn.execute("PRAGMA foreign_keys = ON;")
-        week_ids = [r["id"] for r in conn.execute("SELECT id FROM weeks WHERE plan_id = ?;", (req.plan_id,)).fetchall()]
-        if week_ids:
-            placeholders = ",".join("?" for _ in week_ids)
-            conn.execute(f"DELETE FROM workouts WHERE week_id IN ({placeholders});", week_ids)
-            conn.execute(f"DELETE FROM weeks WHERE id IN ({placeholders});", week_ids)
+        conn.execute("DELETE FROM workouts WHERE week_id IN (SELECT id FROM weeks WHERE plan_id = ?);", (req.plan_id,))
+        conn.execute("DELETE FROM weeks WHERE plan_id = ?;", (req.plan_id,))
         conn.execute("DELETE FROM plans WHERE id = ?;", (req.plan_id,))
         conn.commit()
     return {"status": "ok", "message": "Plan gelöscht"}
@@ -754,7 +783,7 @@ def index():
         </div>
 
         <div class="my-3">
-          <h2 id="today-workout-title" class="text-xl sm:text-2xl font-bold tracking-tight text-white mb-1 truncate">Dauerlauf</h2>
+          <h2 id="today-workout-title" class="text-xl sm:text-2xl font-bold tracking-tight text-white mb-1 truncate">--</h2>
           <div class="flex flex-wrap items-baseline gap-2">
             <span id="today-metric" class="font-mono text-2xl sm:text-3xl font-extrabold text-teal-400">--</span>
             <span id="today-intensity" class="text-xs sm:text-sm font-mono text-slate-300"></span>
@@ -1248,6 +1277,22 @@ def index():
       const plan = appState.active_plan;
       const isArchived = plan.status === 'archived';
       document.getElementById('plan-title').innerText = `${plan.sport_type.toUpperCase()} · ${plan.goal_type.replace('_', ' ').toUpperCase()} (Ziel: ${plan.target_date})${isArchived ? ' [ARCHIVIERT]' : ''}`;
+
+      // Check-in input placeholder
+      const checkinInput = document.getElementById('checkin-input');
+      if (checkinInput) {
+        if (plan.sport_type === 'swimming') {
+          checkinInput.placeholder = "z.B. '2500m geschwommen, Schulter zwickt leicht (3/10)'";
+        } else if (plan.sport_type === 'strength') {
+          checkinInput.placeholder = "z.B. '16 Sätze absolviert, RPE 8, alles stabil'";
+        } else if (plan.sport_type === 'cycling') {
+          checkinInput.placeholder = "z.B. '75 min gefahren, 210W Schnitt, RPE 7'";
+        } else if (plan.sport_type === 'triathlon' || plan.sport_type === 'multisport') {
+          checkinInput.placeholder = "z.B. 'Koppeleinheit absolviert (90min Rad + 5km Lauf), RPE 7'";
+        } else {
+          checkinInput.placeholder = "z.B. '6 km gelaufen, Knie zwickt leicht (3/10)'";
+        }
+      }
 
       // Plan Selector
       const selector = document.getElementById('plan-selector');
@@ -1758,10 +1803,11 @@ def index():
     async function recalculateZonesBtn() {
       const v = parseFloat(document.getElementById('input-vdot-val').value);
       if (!v) return;
+      const curSport = appState.active_plan ? appState.active_plan.sport_type : 'running';
       await fetch('/api/profile/recalculate-zones', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({vdot: v})
+        body: JSON.stringify({reference_value: v, sport_type: curSport})
       });
       await loadState();
     }

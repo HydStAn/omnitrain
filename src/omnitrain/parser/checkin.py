@@ -99,7 +99,7 @@ class CheckinParser:
                 notes=text
             )
 
-        # Check symptoms
+        # Check symptoms across sports (running, swimming, strength, cycling)
         symptoms = []
         if "achilles" in lower or "achillessehne" in lower:
             symptoms.append(Symptom(location="achilles", type="tendon_pain", severity=4))
@@ -107,11 +107,19 @@ class CheckinParser:
             symptoms.append(Symptom(location="knee", type="joint_pain", severity=5))
         elif "schienbein" in lower or "shin" in lower:
             symptoms.append(Symptom(location="shin", type="shin_pain", severity=4))
+        elif "schulter" in lower or "shoulder" in lower:
+            symptoms.append(Symptom(location="shoulder", type="joint_pain", severity=4))
+        elif "ellbogen" in lower or "elbow" in lower:
+            symptoms.append(Symptom(location="elbow", type="tendon_pain", severity=4))
+        elif "rücken" in lower or "ruecken" in lower or "back" in lower:
+            symptoms.append(Symptom(location="back", type="joint_pain", severity=4))
+        elif "handgelenk" in lower or "wrist" in lower:
+            symptoms.append(Symptom(location="wrist", type="joint_pain", severity=4))
         elif "muskelkater" in lower:
             symptoms.append(Symptom(location="legs", type="muscle_soreness", severity=3))
 
         # Check completion status
-        if "ausgefallen" in lower or "nicht gelaufen" in lower or "nicht trainiert" in lower or "verpasst" in lower:
+        if "ausgefallen" in lower or "nicht gelaufen" in lower or "nicht trainiert" in lower or "verpasst" in lower or "nicht geschwommen" in lower:
             status = CompletionStatus.SKIPPED
         elif "abgebrochen" in lower or "nur " in lower:
             status = CompletionStatus.PARTIAL
@@ -133,12 +141,25 @@ class CheckinParser:
                 if 1 <= val <= 10:
                     rpe = val
 
-        # Extract metric if present (e.g. "8 km" or "10km")
-        dist_match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:km|kilometer)", lower)
+        # Extract metric if present across sports: km, m, sets, min
+        km_match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:km|kilometer)\b", lower)
+        m_match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:m|meter)\b", lower)
+        sets_match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:sätze|saetze|sets)\b", lower)
+        min_match = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:min|minuten|minutes)\b", lower)
+
         metrics = None
-        if dist_match:
-            dist = float(dist_match.group(1).replace(",", "."))
+        if m_match and not km_match:
+            dist = float(m_match.group(1).replace(",", "."))
+            metrics = ActualMetrics(metric_primary=dist, unit="m")
+        elif sets_match:
+            s_count = float(sets_match.group(1).replace(",", "."))
+            metrics = ActualMetrics(metric_primary=s_count, unit="sets")
+        elif km_match:
+            dist = float(km_match.group(1).replace(",", "."))
             metrics = ActualMetrics(metric_primary=dist, unit="km")
+        elif min_match:
+            dur = float(min_match.group(1).replace(",", "."))
+            metrics = ActualMetrics(metric_primary=dur, unit="min")
 
         return CheckinEvent(
             completion_status=status,

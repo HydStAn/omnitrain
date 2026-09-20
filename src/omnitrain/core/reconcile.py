@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
-from omnitrain.core.models import CheckinEvent, CompletionStatus, Week, Workout
+from omnitrain.core.models import CheckinEvent, CompletionStatus, SportType, Week, Workout
 
 
 class MutationRule(str, Enum):
@@ -25,6 +25,31 @@ class PlanMutation(BaseModel):
     description: str
     affected_workout_ids: List[str] = []
     volume_adjustment_percent: float = 0.0
+
+
+def demote_high_intensity(wo: Workout, reason_prefix: str = "Schonung") -> bool:
+    """Demotes tempo, intervals, or heavy sets to easy/recovery across all sport types."""
+    if wo.sport_type == SportType.SWIMMING and wo.workout_type in ["css_threshold", "vo2max", "sprint"]:
+        wo.workout_type = "technique_drills"
+        wo.intensity_target = "Z1"
+        wo.intensity_detail = f"{reason_prefix}: Technikdrills (Z1) statt CSS-Tempo"
+        return True
+    elif wo.sport_type == SportType.CYCLING and wo.workout_type in ["sweetspot", "interval", "threshold"]:
+        wo.workout_type = "recovery"
+        wo.intensity_target = "Z1"
+        wo.intensity_detail = f"{reason_prefix}: Aktive Erholung (Z1) statt Schwellenbereich"
+        return True
+    elif wo.sport_type == SportType.STRENGTH and wo.workout_type in ["strength", "power"]:
+        wo.workout_type = "hypertrophy"
+        wo.intensity_target = "hypertrophy"
+        wo.intensity_detail = f"{reason_prefix}: DUP Hypertrophie (3+ RIR) statt Maximalkraft"
+        return True
+    elif wo.workout_type in ["tempo", "interval"]:
+        wo.workout_type = "easy"
+        wo.intensity_target = "easy"
+        wo.intensity_detail = f"{reason_prefix}: Schonlauf (Zone E) statt Tempo"
+        return True
+    return False
 
 
 class StateMachineReconciler:
@@ -87,34 +112,27 @@ class StateMachineReconciler:
                         wo.intensity_target = "rest"
                         wo.intensity_detail = f"Schmerzpause ({max_severity}/10): Regeneration"
                         affected_ids.append(wo.id)
-                    elif wo.workout_type in ["tempo", "interval"]:
-                        # Strip tempo/intervals for the rest of the week
-                        wo.workout_type = "easy"
-                        wo.intensity_target = "easy"
-                        wo.intensity_detail = "Schonlauf (Zone E) statt Tempo"
+                    elif demote_high_intensity(wo, "Schonung"):
                         affected_ids.append(wo.id)
 
                 mutations.append(PlanMutation(
                     rule=MutationRule.PAIN_REST_48H,
-                    description=f"Struktureller Schmerz (Severity {max_severity}/10): 72h Pause und Tempoeinheiten gestrichen.",
+                    description=f"Struktureller Schmerz (Severity {max_severity}/10): 72h Pause und harte Intensitäten gestrichen.",
                     affected_workout_ids=affected_ids
                 ))
                 return mutations
 
             elif 1 <= max_severity <= 3:
-                # Severity 1-3: Niggle -> replace tempo/intervals in next 48h with easy runs
+                # Severity 1-3: Niggle -> replace tempo/intervals in next 48h with easy/recovery
                 cutoff_date = checkin_date + timedelta(days=2)
                 affected_ids = []
                 for wo in upcoming_workouts:
-                    if wo.date <= cutoff_date and wo.workout_type in ["tempo", "interval"]:
-                        wo.workout_type = "easy"
-                        wo.intensity_target = "easy"
-                        wo.intensity_detail = f"Niggle-Beobachtung ({max_severity}/10): Schwellenlauf durch Easy Run ersetzt."
+                    if wo.date <= cutoff_date and demote_high_intensity(wo, f"Niggle-Beobachtung ({max_severity}/10)"):
                         affected_ids.append(wo.id)
 
                 mutations.append(PlanMutation(
                     rule=MutationRule.PAIN_NIGGLE_EASY_ONLY,
-                    description=f"Niggle registriert ({max_severity}/10): Tempo in den nächsten 48h auf Easy gedrosselt.",
+                    description=f"Niggle registriert ({max_severity}/10): Harte Intensitäten in den nächsten 48h auf Grundlagentempo gedrosselt.",
                     affected_workout_ids=affected_ids
                 ))
                 return mutations
