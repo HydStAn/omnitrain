@@ -741,9 +741,15 @@ def index():
     .glass-pill { background: rgba(30, 41, 59, 0.7); border: 1px solid rgba(255, 255, 255, 0.05); }
     .hide-scrollbar::-webkit-scrollbar { display: none; }
     .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    /* Modern Slim Dark Scrollbar */
+    .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(100, 116, 139, 0.35); border-radius: 9999px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(13, 148, 136, 0.6); }
+    .custom-scrollbar { scrollbar-width: thin; scrollbar-color: rgba(100, 116, 139, 0.35) transparent; }
   </style>
 </head>
-<body class="min-h-screen font-sans flex justify-center py-4 sm:py-6 px-2.5 sm:px-4 pb-28 overflow-x-hidden w-full">
+<body class="min-h-screen font-sans flex justify-center py-4 sm:py-6 px-2.5 sm:px-4 pb-36 overflow-x-hidden w-full">
   <div class="w-full max-w-xl flex flex-col gap-5 sm:gap-6 min-w-0">
 
     <!-- Top Navigation / Status Header -->
@@ -899,19 +905,21 @@ def index():
       </section>
 
       <!-- Screen 2: Conversational Check-in (Things 3 / Messenger UX) -->
-      <section class="glass-card rounded-2xl p-4 sm:p-5">
-        <div class="flex items-center justify-between mb-3">
-          <div class="flex items-center gap-2">
-            <svg class="w-4 h-4 text-teal-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 100-6 3 3 0 000 6z"></path></svg>
-            <h3 class="text-sm font-semibold tracking-tight text-slate-200">Conversational Coach</h3>
-            <span id="llm-status-badge" class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">Connecting LLM...</span>
+      <section class="glass-card rounded-2xl p-4 sm:p-5 mb-4">
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <div class="flex flex-wrap items-center gap-2 min-w-0">
+            <div class="flex items-center gap-1.5 shrink-0">
+              <svg class="w-4 h-4 text-teal-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 100-6 3 3 0 000 6z"></path></svg>
+              <h3 class="text-sm font-semibold tracking-tight text-slate-200">Conversational Coach</h3>
+            </div>
+            <span id="llm-status-badge" class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 truncate max-w-[200px]">Connecting LLM...</span>
           </div>
-          <button type="button" onclick="showTermHelp('rpe', event)" class="text-[10px] text-teal-400 hover:underline flex items-center gap-1" title="Erklärung zur RPE-Belastungsskala (1-10)">
+          <button type="button" onclick="showTermHelp('rpe', event)" class="text-[10px] text-teal-400 hover:underline flex items-center gap-1 shrink-0" title="Erklärung zur RPE-Belastungsskala (1-10)">
             <span>Was ist RPE?</span> <span class="w-3 h-3 rounded-full bg-slate-800 text-slate-400 inline-flex items-center justify-center text-[8px] font-bold">?</span>
           </button>
         </div>
 
-        <div id="chat-messages" class="flex flex-col gap-3 max-h-80 overflow-y-auto mb-3 text-sm pr-1">
+        <div id="chat-messages" class="flex flex-col gap-2.5 max-h-64 sm:max-h-72 overflow-y-auto mb-3 text-xs sm:text-sm pr-1.5 custom-scrollbar">
           <div class="bg-slate-800/80 rounded-2xl rounded-tl-sm p-3 max-w-[90%] sm:max-w-[88%] text-slate-300 break-words">
             Wie war dein Training heute? Erzähl mir frei von Distanz, Gefühl (<span class="text-teal-300 cursor-pointer underline decoration-dotted" onclick="showTermHelp('rpe', event)" title="Rating of Perceived Exertion (1=sehr leicht, 10=maximal)">RPE 1-10 ℹ</span>) oder etwaigen Schmerzen / Symptomen.
           </div>
