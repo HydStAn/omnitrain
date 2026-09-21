@@ -2515,6 +2515,7 @@ def index():
           else if (p.sport_type === 'triathlon' || p.sport_type === 'multisport') sportIcon = '🏊';
 
           const cardBorder = isSelected ? 'border-teal-500/60 ring-1 ring-teal-500/40 bg-teal-950/20' : 'border-slate-800 bg-slate-950/60';
+          const goalTitle = (p.goal_type || '').replace('_', ' ').toUpperCase();
           const displayName = p.name || `${goalTitle} (${p.sport_type})`;
 
           const item = document.createElement('div');
