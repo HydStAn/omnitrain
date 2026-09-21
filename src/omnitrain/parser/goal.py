@@ -33,6 +33,7 @@ class GoalParseResult(BaseModel):
 
 
 import os
+from omnitrain.core.llm import UnifiedLLMClient
 
 DEFAULT_OLLAMA_URL = os.environ.get("OMNITRAIN_OLLAMA_URL", "http://127.0.0.1:11434")
 DEFAULT_OLLAMA_MODEL = os.environ.get("OMNITRAIN_MODEL", "qwen2.5:3b")
@@ -41,9 +42,17 @@ DEFAULT_OLLAMA_MODEL = os.environ.get("OMNITRAIN_MODEL", "qwen2.5:3b")
 class GoalParser:
     """Parses natural language onboarding goal into structured plan parameters."""
 
-    def __init__(self, ollama_url: str = DEFAULT_OLLAMA_URL, model: str = DEFAULT_OLLAMA_MODEL):
-        self.ollama_url = ollama_url
-        self.model = model
+    def __init__(self, llm_client: Any = "default", ollama_url: Optional[str] = None, model: Optional[str] = None):
+        if ollama_url or model:
+            self.llm_client = UnifiedLLMClient(
+                provider="ollama",
+                base_url=ollama_url or DEFAULT_OLLAMA_URL,
+                model=model or DEFAULT_OLLAMA_MODEL
+            )
+        elif llm_client == "default":
+            self.llm_client = UnifiedLLMClient()
+        else:
+            self.llm_client = llm_client
 
     def parse(self, text: str) -> GoalParseResult:
         # Step 1: Try local LLM if online
@@ -55,37 +64,54 @@ class GoalParser:
         return self._rule_based_parse(text)
 
     def _try_llm_parse(self, text: str) -> Optional[GoalParseResult]:
-        prompt = f"""Extrahiere das sportliche Trainingsziel als valides JSON nach folgendem Schema:
-{{
-  "sport_type": "running" | "cycling" | "swimming" | "strength",
-  "target_event": "marathon" | "half_marathon" | "10k" | "5k" | "ftp_builder" | "hypertrophy",
-  "target_weeks": int,
-  "current_baseline": {{"value": float, "unit": "km_per_week" | "min_per_week" | "tss_per_week"}},
-  "sessions_per_week": int,
-  "preferred_days": [int],
-  "key_session_day": int,
-  "fitness_level": "beginner" | "intermediate" | "advanced",
-  "user_profile": {{
-    "age": int | null,
-    "resting_hr": int | null,
-    "max_hr": int | null,
-    "recent_race": str | null,
-    "weight_kg": float | null,
-    "vdot": float | null
-  }},
-  "constraints": [str]
-}}
-Text: {text}"""
+        system_prompt = """Du bist ein präziser Extraktor für sportliche Trainingsziele.
+Antworte DIREKT mit einem validen JSON-Objekt ohne Markdown-Codeblöcke nach folgendem Schema:
+{
+  "sport_type": "running",
+  "target_event": "marathon",
+  "target_weeks": 16,
+  "current_baseline": {"value": 25.0, "unit": "km_per_week"},
+  "sessions_per_week": 4,
+  "preferred_days": [2, 4, 6, 7],
+  "key_session_day": 7,
+  "fitness_level": "intermediate",
+  "user_profile": {
+    "age": null,
+    "resting_hr": null,
+    "max_hr": null,
+    "recent_race": null,
+    "weight_kg": null,
+    "vdot": null
+  },
+  "constraints": []
+}
+Erlaubte Werte:
+- sport_type: "running" | "cycling" | "swimming" | "strength"
+- target_event: "marathon" | "half_marathon" | "10k" | "5k" | "ftp_builder" | "hypertrophy"
+- target_weeks: Ganzzahl (z.B. 12, 16)
+- current_baseline.unit: "km_per_week" | "min_per_week" | "tss_per_week"
+- fitness_level: "beginner" | "intermediate" | "advanced"
+"""
         try:
-            res = httpx.post(
-                f"{self.ollama_url}/api/generate",
-                json={"model": self.model, "prompt": prompt, "format": "json", "stream": False},
-                timeout=5.0
-            )
-            if res.status_code == 200:
-                raw_json = res.json().get("response")
-                if raw_json:
-                    return GoalParseResult.model_validate_json(raw_json)
+            if hasattr(self.llm_client, "chat_completion_json"):
+                raw_json = self.llm_client.chat_completion_json(
+                    system_prompt=system_prompt,
+                    user_prompt=f"Text: {text}",
+                    max_tokens=1200
+                )
+            elif hasattr(self.llm_client, "ollama_url"):
+                prompt = f"{system_prompt}\nText: {text}"
+                res = httpx.post(
+                    f"{self.llm_client.ollama_url}/api/generate",
+                    json={"model": getattr(self.llm_client, "model", DEFAULT_OLLAMA_MODEL), "prompt": prompt, "format": "json", "stream": False},
+                    timeout=5.0
+                )
+                raw_json = res.json().get("response") if res.status_code == 200 else None
+            else:
+                raw_json = None
+
+            if raw_json:
+                return GoalParseResult.model_validate_json(raw_json)
         except Exception:
             return None
         return None

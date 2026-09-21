@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from omnitrain.core.models import CompletionStatus, SportType, Workout
 from omnitrain.core.reconcile import StateMachineReconciler
 from omnitrain.core.status_update import StatusUpdateEvent, StatusUpdateHandler, UpdateType
+from omnitrain.core.llm import UnifiedLLMClient
 from omnitrain.load.pmc import DailyLoad, PMCEngine
 from omnitrain.parser.checkin import CheckinParser
 from omnitrain.parser.goal import GoalParser
@@ -155,6 +156,9 @@ def get_state(plan_id: Optional[str] = None, show_archived: bool = False):
         ).fetchall()
         recent_checkins = [dict(r) for r in reversed(recent_checkin_rows)]
 
+        llm_client = UnifiedLLMClient()
+        llm_info = llm_client.get_info()
+
         return {
             "active_plan": dict(plan_row),
             "all_plans": [dict(p) for p in all_plans],
@@ -172,6 +176,7 @@ def get_state(plan_id: Optional[str] = None, show_archived: bool = False):
             "is_pain_mode": has_pain_workouts,
             "pain_detail": pain_detail,
             "recent_checkins": recent_checkins,
+            "llm": llm_info,
         }
 
 
@@ -899,6 +904,7 @@ def index():
           <div class="flex items-center gap-2">
             <svg class="w-4 h-4 text-teal-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 100-6 3 3 0 000 6z"></path></svg>
             <h3 class="text-sm font-semibold tracking-tight text-slate-200">Conversational Coach</h3>
+            <span id="llm-status-badge" class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">Connecting LLM...</span>
           </div>
           <button type="button" onclick="showTermHelp('rpe', event)" class="text-[10px] text-teal-400 hover:underline flex items-center gap-1" title="Erklärung zur RPE-Belastungsskala (1-10)">
             <span>Was ist RPE?</span> <span class="w-3 h-3 rounded-full bg-slate-800 text-slate-400 inline-flex items-center justify-center text-[8px] font-bold">?</span>
@@ -1922,6 +1928,21 @@ def index():
         } else {
           statusBtn.className = "text-xs font-semibold px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700 transition flex items-center gap-1.5 shrink-0";
           statusBtn.innerHTML = `<span>🩺</span> <span class="hidden xs:inline">Wie geht's dir?</span><span class="xs:hidden">Status</span>`;
+        }
+      }
+
+      // LLM Badge
+      const llmBadge = document.getElementById('llm-status-badge');
+      if (llmBadge) {
+        if (appState.llm && appState.llm.available) {
+          const mName = (appState.llm.model || '').split('/').pop() || 'LLM';
+          llmBadge.className = "text-[10px] font-mono px-2 py-0.5 rounded-full bg-teal-500/10 text-teal-300 border border-teal-500/30 flex items-center gap-1";
+          llmBadge.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-teal-400 inline-block animate-pulse"></span> ${mName} (LM Studio)`;
+          llmBadge.title = `Host: ${appState.llm.base_url} · Modell: ${appState.llm.model}`;
+        } else {
+          llmBadge.className = "text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700";
+          llmBadge.innerText = "Offline (Rule-based Fallback)";
+          llmBadge.title = "Kein LLM erreichbar - deterministischer Keyword-Parser aktiv.";
         }
       }
 

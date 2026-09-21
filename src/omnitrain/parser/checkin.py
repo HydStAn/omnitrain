@@ -1,6 +1,6 @@
 """Semantic Checkin Parser with graceful fallback when local LLM is offline."""
 from datetime import date
-from typing import Optional, Protocol
+from typing import Any, Optional, Protocol
 import httpx
 from pydantic import ValidationError
 from omnitrain.core.models import ActualMetrics, CheckinEvent, CompletionStatus, Symptom
@@ -12,6 +12,7 @@ class LLMClientProtocol(Protocol):
 
 
 import os
+from omnitrain.core.llm import UnifiedLLMClient
 
 DEFAULT_OLLAMA_URL = os.environ.get("OMNITRAIN_OLLAMA_URL", "http://127.0.0.1:11434")
 DEFAULT_OLLAMA_MODEL = os.environ.get("OMNITRAIN_MODEL", "qwen2.5:3b")
@@ -64,17 +65,48 @@ Text: {text}"""
 class CheckinParser:
     """
     Parser orchestrator:
-      1. Tries LLM Client (if available)
+      1. Tries LLM Client (UnifiedLLMClient or provided client)
       2. If unavailable or fails validation, uses deterministic structured prompts / keyword parser.
     """
 
-    def __init__(self, llm_client: Optional[LLMClientProtocol] = None):
-        self.llm_client = llm_client or OllamaLocalClient()
+    def __init__(self, llm_client: Any = "default"):
+        if llm_client == "default":
+            self.llm_client = UnifiedLLMClient()
+        else:
+            self.llm_client = llm_client
 
     def parse(self, raw_input: str) -> CheckinEvent:
-        # Step 1: Try local LLM if online
+        # Step 1: Try LLM if online
         if self.llm_client:
-            raw_json = self.llm_client.parse_freetext_checkin(raw_input)
+            raw_json = None
+            if hasattr(self.llm_client, "parse_freetext_checkin"):
+                raw_json = self.llm_client.parse_freetext_checkin(raw_input)
+            elif hasattr(self.llm_client, "chat_completion_json"):
+                system_prompt = """Du bist ein präziser Extraktor für sportliche Check-ins.
+Antworte DIREKT mit einem validen JSON-Objekt ohne Markdown-Codeblöcke und ohne Einleitung nach folgendem Schema:
+{
+  "event_type": "workout_checkin",
+  "completion_status": "completed",
+  "completion_reason": null,
+  "actual_metrics": {"metric_primary": 8.5, "unit": "km"},
+  "perceived_rpe": 5,
+  "sickness_reported": false,
+  "sickness_days": 0,
+  "symptoms": [{"location": "knee", "side": null, "type": "joint_pain", "severity": 3}],
+  "notes": "string"
+}
+Regeln:
+- event_type: immer "workout_checkin"
+- completion_status: "completed", "partial", "skipped" oder "sick"
+- completion_reason: null, "time_constraint" oder "exhaustion"
+- actual_metrics.unit: "km", "min", "m" oder "sets"
+- perceived_rpe: Zahl von 1-10 oder null
+- symptoms: Liste von Symptomen (mit location, side, type, severity 1-10) oder []"""
+                raw_json = self.llm_client.chat_completion_json(
+                    system_prompt=system_prompt,
+                    user_prompt=f"Text: {raw_input}"
+                )
+
             if raw_json:
                 try:
                     return CheckinEvent.model_validate_json(raw_json)
