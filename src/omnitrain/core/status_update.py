@@ -49,7 +49,7 @@ def restore_workout_to_easy(wo: Workout) -> None:
         wo.intensity_target = "easy"
         wo.metric_primary = 6.0
         wo.metric_unit = "km"
-        wo.intensity_detail = "Post-Recovery Schonlauf (Zone E)"
+        wo.intensity_detail = "Regulärer Dauerlauf (Zone E)"
 
 
 class StatusUpdateHandler:
@@ -172,13 +172,24 @@ class StatusUpdateHandler:
             if status == "resolved":
                 affected_ids = []
                 for wo in upcoming_workouts:
-                    if wo.workout_type == "rest" and any(k in (wo.intensity_detail or "") for k in ["Schmerz", "Niggle", "Schonung"]):
+                    has_pain_flag = any(k in (wo.intensity_detail or "") for k in ["Schmerz", "Niggle", "Schonung"])
+                    if wo.workout_type == "rest" and has_pain_flag:
                         restore_workout_to_easy(wo)
+                        affected_ids.append(wo.id)
+                    elif has_pain_flag:
+                        if wo.sport_type == SportType.SWIMMING:
+                            wo.intensity_detail = "Technikdrills & Ausdauer in Z1"
+                        elif wo.sport_type == SportType.CYCLING:
+                            wo.intensity_detail = "Grundlagenausdauer Z1/Z2"
+                        elif wo.sport_type == SportType.STRENGTH:
+                            wo.intensity_detail = "Reguläre Hypertrophie-Sätze"
+                        else:
+                            wo.intensity_detail = "Regulärer Dauerlauf (Zone E)"
                         affected_ids.append(wo.id)
 
                 mutations.append(PlanMutation(
                     rule=MutationRule.COMPLETED_AS_PLANNED,
-                    description="Schmerz als abgeklungen gemeldet: Ruhetage wieder zu Grundlageneinheiten aktiviert.",
+                    description="Schmerz als abgeklungen gemeldet: Ruhetage und geschonte Einheiten wieder regulär aktiviert.",
                     affected_workout_ids=affected_ids
                 ))
                 return mutations

@@ -528,7 +528,7 @@ def post_status_update(req: StatusUpdateRequest):
             SELECT w.* FROM workouts w
             JOIN weeks wk ON w.week_id = wk.id
             WHERE wk.plan_id = ? AND w.date >= ?
-            ORDER BY w.date ASC LIMIT 14;
+            ORDER BY w.date ASC;
             """,
             (selected_plan_id, today.isoformat())
         ).fetchall()
