@@ -171,3 +171,51 @@ def test_replan_engine_multisport():
     # Adjusted baseline TSS is 300 * 0.85 = 255.0 TSS -> Week 1 build ~ 272.8 TSS
     assert bike_weeks[0].target_weekly_tss == pytest.approx(272.8, abs=2.0)
 
+
+def test_status_update_sickness_reporting():
+    today = date(2026, 10, 10)
+    upcoming = [
+        make_dummy_workout("w1", date(2026, 10, 10), "tempo", 8.0),
+        make_dummy_workout("w2", date(2026, 10, 12), "long_run", 18.0),
+    ]
+    event = StatusUpdateEvent(update_type=UpdateType.SICKNESS, details={"condition": "sickness"})
+    mutations = StatusUpdateHandler.handle_status_update(event, today, upcoming)
+
+    assert len(mutations) == 1
+    assert upcoming[0].workout_type == "rest"
+    assert upcoming[0].metric_primary == 0.0
+    assert upcoming[1].workout_type == "rest"
+
+
+def test_status_update_pain_reporting():
+    today = date(2026, 10, 10)
+    # 1. Structural pain (severity >= 4): 72h rest
+    upcoming1 = [
+        make_dummy_workout("w1", date(2026, 10, 11), "intervals", 8.0),
+        make_dummy_workout("w2", date(2026, 10, 13), "easy", 10.0),
+        make_dummy_workout("w3", date(2026, 10, 15), "tempo", 10.0),
+    ]
+    event_pain = StatusUpdateEvent(
+        update_type=UpdateType.PAIN_REPORT,
+        details={"location": "Knie", "severity": 6}
+    )
+    mutations1 = StatusUpdateHandler.handle_status_update(event_pain, today, upcoming1)
+    assert len(mutations1) == 1
+    assert upcoming1[0].workout_type == "rest"  # within 72h
+    assert upcoming1[1].workout_type == "rest"  # within 72h
+    assert upcoming1[2].workout_type == "easy"  # after 72h, demoted from tempo to easy
+
+    # 2. Niggle (severity <= 3): only drop intensity in next 48h
+    upcoming2 = [
+        make_dummy_workout("w1", date(2026, 10, 11), "tempo", 8.0),
+        make_dummy_workout("w2", date(2026, 10, 14), "tempo", 10.0),
+    ]
+    event_niggle = StatusUpdateEvent(
+        update_type=UpdateType.PAIN_REPORT,
+        details={"location": "Achillessehne", "severity": 2}
+    )
+    mutations2 = StatusUpdateHandler.handle_status_update(event_niggle, today, upcoming2)
+    assert len(mutations2) == 1
+    assert upcoming2[0].workout_type == "easy"  # demoted
+    assert upcoming2[1].workout_type == "tempo"  # beyond 48h preserved
+

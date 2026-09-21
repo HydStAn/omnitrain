@@ -120,6 +120,15 @@ def get_state(plan_id: Optional[str] = None, show_archived: bool = False):
             w["date"] >= today_str and "Krankheit" in (w["intensity_detail"] or "")
             for w in w_list
         )
+        has_pain_workouts = any(
+            w["date"] >= today_str and any(k in (w["intensity_detail"] or "") for k in ["Schmerz", "Niggle", "Schonung"])
+            for w in w_list
+        )
+        pain_detail = None
+        for w in w_list:
+            if w["date"] >= today_str and any(k in (w["intensity_detail"] or "") for k in ["Schmerz", "Niggle", "Schonung"]):
+                pain_detail = w["intensity_detail"]
+                break
 
         return {
             "active_plan": dict(plan_row),
@@ -134,7 +143,9 @@ def get_state(plan_id: Optional[str] = None, show_archived: bool = False):
             "profile": profile_json,
             "pmc": latest_pmc,
             "pmc_series": pmc_series_data,
-            "is_sick_mode": has_sick_workouts
+            "is_sick_mode": has_sick_workouts,
+            "is_pain_mode": has_pain_workouts,
+            "pain_detail": pain_detail,
         }
 
 
@@ -439,9 +450,10 @@ def post_checkin(req: CheckinRequest):
 
 
 class StatusUpdateRequest(BaseModel):
-    update_type: str  # recovery, pain_resolved, readiness
+    update_type: str  # recovery, sickness, pain_resolved, pain_report, readiness, fatigue, fit
     note: Optional[str] = None
     severity: Optional[int] = None
+    location: Optional[str] = None
     plan_id: Optional[str] = None
 
 
@@ -456,12 +468,21 @@ def post_status_update(req: StatusUpdateRequest):
     if req.update_type == "recovery":
         u_type = UpdateType.RECOVERY
         details = {"condition": "sickness", "status": "resolved"}
-    elif req.update_type in ["pain_resolved", "pain"]:
+    elif req.update_type == "sickness":
+        u_type = UpdateType.SICKNESS
+        details = {"condition": "sickness"}
+    elif req.update_type in ["pain_resolved", "pain_clear"]:
         u_type = UpdateType.PAIN_UPDATE
         details = {"status": "resolved"}
+    elif req.update_type == "pain_report":
+        u_type = UpdateType.PAIN_REPORT
+        details = {"severity": req.severity or 5, "location": req.location or "Gelenk/Muskel"}
     elif req.update_type in ["readiness", "fatigue"]:
         u_type = UpdateType.READINESS_UPDATE
         details = {"severity": req.severity or 8}
+    elif req.update_type == "fit":
+        u_type = UpdateType.FIT
+        details = {"readiness": 10}
 
     event = StatusUpdateEvent(update_type=u_type, details=details, notes=req.note)
 
@@ -708,7 +729,10 @@ def index():
         <select id="plan-selector" onchange="onPlanSelect(this.value)" class="text-xs bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-teal-500 font-medium max-w-[140px] sm:max-w-[200px] truncate shrink-0">
           <!-- Dynamically populated -->
         </select>
-        <button onclick="openStatusModal()" class="text-xs font-semibold px-2.5 sm:px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30 transition flex items-center gap-1.5 shrink-0">
+        <button onclick="openGlossaryModal()" class="text-xs font-semibold px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 hover:border-slate-600 transition flex items-center gap-1.5 shrink-0" title="Glossar & Erklärungen aller Abkürzungen (CTL, VDOT, FTP, etc.)">
+          <span>❓</span> <span class="hidden xs:inline">Hilfe & Glossar</span><span class="xs:hidden">Hilfe</span>
+        </button>
+        <button id="header-status-btn" onclick="openStatusModal()" class="text-xs font-semibold px-2.5 sm:px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30 transition flex items-center gap-1.5 shrink-0">
           <span>🩺</span> <span class="hidden xs:inline">Wie geht's dir?</span><span class="xs:hidden">Status</span>
         </button>
         <button onclick="openOnboardModal()" class="text-xs font-semibold px-2.5 sm:px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white shadow transition shrink-0">
@@ -731,6 +755,25 @@ def index():
       </button>
     </div>
 
+    <!-- PAIN Mode Banner -->
+    <div id="pain-banner" class="hidden glass-card border-amber-500/40 bg-amber-950/40 rounded-2xl p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-amber-200 text-xs">
+      <div class="flex items-center gap-3 min-w-0">
+        <span class="text-2xl shrink-0">🩹</span>
+        <div class="min-w-0">
+          <div class="font-bold text-amber-300 text-sm">Schonmodus aktiv</div>
+          <div id="pain-banner-detail" class="text-amber-300/80 text-[11px] mt-0.5 break-words">Workouts werden wegen Beschwerden geschont.</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-2 shrink-0 self-start sm:self-auto">
+        <button onclick="submitStatusUpdate('pain_resolved', 'Schmerzen vollständig abgeklungen')" class="px-3 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white font-semibold text-xs shadow-lg transition flex items-center gap-1">
+          <span>✨</span> Schmerzfrei
+        </button>
+        <button onclick="openStatusModal()" class="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition">
+          Anpassen
+        </button>
+      </div>
+    </div>
+
     <!-- MAIN APP TABS: Heute · Wochenplan · Makrozyklus · Profil & Zonen -->
 
     <!-- ================= TAB 1: HEUTE ================= -->
@@ -739,30 +782,40 @@ def index():
       <!-- PMC Metrics Pill Bar -->
       <div id="pmc-bar" class="grid grid-cols-3 gap-2 text-center text-xs">
         <div class="glass-pill p-2 rounded-xl">
-          <span class="text-slate-400 block text-[10px] uppercase tracking-wider font-semibold">Fitness (CTL)</span>
-          <span id="pmc-ctl" class="font-mono text-base font-bold text-teal-400">--</span>
+          <div class="flex items-center justify-center gap-1">
+            <span class="text-slate-400 text-[10px] uppercase tracking-wider font-semibold">Fitness (CTL)</span>
+            <button type="button" onclick="showTermHelp('ctl', event)" class="w-3.5 h-3.5 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white flex items-center justify-center text-[9px] font-bold transition shrink-0" title="Was bedeutet CTL? (Chronic Training Load / Fitness)">?</button>
+          </div>
+          <span id="pmc-ctl" class="font-mono text-base font-bold text-teal-400 block mt-0.5">--</span>
         </div>
         <div class="glass-pill p-2 rounded-xl">
-          <span class="text-slate-400 block text-[10px] uppercase tracking-wider font-semibold">Fatigue (ATL)</span>
-          <span id="pmc-atl" class="font-mono text-base font-bold text-purple-400">--</span>
+          <div class="flex items-center justify-center gap-1">
+            <span class="text-slate-400 text-[10px] uppercase tracking-wider font-semibold">Fatigue (ATL)</span>
+            <button type="button" onclick="showTermHelp('atl', event)" class="w-3.5 h-3.5 rounded-full bg-slate-800 hover:bg-purple-500 text-slate-400 hover:text-white flex items-center justify-center text-[9px] font-bold transition shrink-0" title="Was bedeutet ATL? (Acute Training Load / Ermüdung)">?</button>
+          </div>
+          <span id="pmc-atl" class="font-mono text-base font-bold text-purple-400 block mt-0.5">--</span>
         </div>
         <div class="glass-pill p-2 rounded-xl">
-          <span class="text-slate-400 block text-[10px] uppercase tracking-wider font-semibold">Form (TSB)</span>
-          <span id="pmc-tsb" class="font-mono text-base font-bold text-amber-400">--</span>
+          <div class="flex items-center justify-center gap-1">
+            <span class="text-slate-400 text-[10px] uppercase tracking-wider font-semibold">Form (TSB)</span>
+            <button type="button" onclick="showTermHelp('tsb', event)" class="w-3.5 h-3.5 rounded-full bg-slate-800 hover:bg-amber-500 text-slate-400 hover:text-white flex items-center justify-center text-[9px] font-bold transition shrink-0" title="Was bedeutet TSB? (Training Stress Balance / Frische)">?</button>
+          </div>
+          <span id="pmc-tsb" class="font-mono text-base font-bold text-amber-400 block mt-0.5">--</span>
         </div>
       </div>
 
       <!-- Screen 8: PMC Chart Canvas Section -->
       <section class="glass-card rounded-2xl p-3.5 sm:p-4 border border-slate-800/80">
         <div class="flex flex-col xs:flex-row justify-between items-start xs:items-center gap-1.5 mb-3">
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-1.5">
             <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">PMC Trend</span>
-            <span class="text-[10px] text-teal-400 font-mono">CTL · ATL · TSB</span>
+            <button type="button" onclick="showTermHelp('pmc', event)" class="w-3.5 h-3.5 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white flex items-center justify-center text-[9px] font-bold transition shrink-0" title="Erklärung zum Performance Management Chart (PMC)">?</button>
+            <span class="text-[10px] text-teal-400 font-mono cursor-pointer hover:underline" onclick="showTermHelp('pmc', event)" title="Erklärung zu PMC">CTL · ATL · TSB</span>
           </div>
           <div class="flex items-center gap-2.5 text-[10px] font-mono">
-            <span class="flex items-center gap-1 text-teal-400"><span class="w-2 h-2 rounded-full bg-teal-400 inline-block"></span> CTL</span>
-            <span class="flex items-center gap-1 text-purple-400"><span class="w-2 h-2 rounded-full bg-purple-400 inline-block"></span> ATL</span>
-            <span class="flex items-center gap-1 text-amber-400"><span class="w-2 h-2 rounded-full bg-amber-400 inline-block"></span> TSB</span>
+            <span class="flex items-center gap-1 text-teal-400 cursor-pointer hover:underline" onclick="showTermHelp('ctl', event)" title="Chronic Training Load (Fitness)"><span class="w-2 h-2 rounded-full bg-teal-400 inline-block"></span> CTL</span>
+            <span class="flex items-center gap-1 text-purple-400 cursor-pointer hover:underline" onclick="showTermHelp('atl', event)" title="Acute Training Load (Fatigue)"><span class="w-2 h-2 rounded-full bg-purple-400 inline-block"></span> ATL</span>
+            <span class="flex items-center gap-1 text-amber-400 cursor-pointer hover:underline" onclick="showTermHelp('tsb', event)" title="Training Stress Balance (Form)"><span class="w-2 h-2 rounded-full bg-amber-400 inline-block"></span> TSB</span>
           </div>
         </div>
         <div class="h-36 sm:h-40 w-full relative">
@@ -802,21 +855,28 @@ def index():
       <section>
         <div class="flex justify-between items-center mb-2 px-1">
           <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400">Diese Woche</h3>
-          <span id="week-phase" class="text-xs font-medium text-teal-400">Phase: BUILD</span>
+          <button type="button" onclick="showTermHelp('phases', event)" id="week-phase" class="text-xs font-medium text-teal-400 hover:underline flex items-center gap-1 cursor-pointer" title="Erklärung zur Trainingsphase (Base, Build, Peak, Taper)">
+            <span>Phase: BUILD</span> <span class="w-3.5 h-3.5 rounded-full bg-slate-800 text-slate-400 inline-flex items-center justify-center text-[9px] font-bold">?</span>
+          </button>
         </div>
         <div id="week-dots" class="grid grid-cols-7 gap-1 sm:gap-2"></div>
       </section>
 
       <!-- Screen 2: Conversational Check-in (Things 3 / Messenger UX) -->
       <section class="glass-card rounded-2xl p-4 sm:p-5">
-        <div class="flex items-center gap-2 mb-3">
-          <svg class="w-4 h-4 text-teal-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 100-6 3 3 0 000 6z"></path></svg>
-          <h3 class="text-sm font-semibold tracking-tight text-slate-200">Conversational Coach</h3>
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <svg class="w-4 h-4 text-teal-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 100-6 3 3 0 000 6z"></path></svg>
+            <h3 class="text-sm font-semibold tracking-tight text-slate-200">Conversational Coach</h3>
+          </div>
+          <button type="button" onclick="showTermHelp('rpe', event)" class="text-[10px] text-teal-400 hover:underline flex items-center gap-1" title="Erklärung zur RPE-Belastungsskala (1-10)">
+            <span>Was ist RPE?</span> <span class="w-3 h-3 rounded-full bg-slate-800 text-slate-400 inline-flex items-center justify-center text-[8px] font-bold">?</span>
+          </button>
         </div>
 
         <div id="chat-messages" class="flex flex-col gap-3 max-h-80 overflow-y-auto mb-3 text-sm pr-1">
           <div class="bg-slate-800/80 rounded-2xl rounded-tl-sm p-3 max-w-[90%] sm:max-w-[88%] text-slate-300 break-words">
-            Wie war dein Training heute? Erzähl mir frei von Distanz, Gefühl (RPE 1-10) oder etwaigen Schmerzen / Symptomen.
+            Wie war dein Training heute? Erzähl mir frei von Distanz, Gefühl (<span class="text-teal-300 cursor-pointer underline decoration-dotted" onclick="showTermHelp('rpe', event)" title="Rating of Perceived Exertion (1=sehr leicht, 10=maximal)">RPE 1-10 ℹ</span>) oder etwaigen Schmerzen / Symptomen.
           </div>
         </div>
 
@@ -848,10 +908,10 @@ def index():
       <!-- Weekly Carousel Header Meta -->
       <div id="carousel-week-meta" class="glass-card rounded-xl p-3 flex items-center justify-between text-xs border border-teal-500/20">
         <div class="flex items-center gap-2 min-w-0">
-          <span id="carousel-phase-badge" class="px-2 py-0.5 rounded bg-teal-500/20 text-teal-300 font-bold uppercase tracking-wider text-[10px] shrink-0">BUILD</span>
-          <span id="carousel-meso-text" class="text-slate-300 truncate">Woche vor Deload</span>
+          <button type="button" onclick="showTermHelp('phases', event)" id="carousel-phase-badge" class="px-2 py-0.5 rounded bg-teal-500/20 text-teal-300 font-bold uppercase tracking-wider text-[10px] shrink-0 hover:ring-1 hover:ring-teal-400 transition" title="Erklärung zur Trainingsphase">BUILD</button>
+          <button type="button" onclick="showTermHelp('deload', event)" id="carousel-meso-text" class="text-slate-300 truncate hover:text-teal-300 transition text-left cursor-pointer" title="Erklärung zu Belastungs- & Entlastungswochen (Deload)">Woche vor Deload</button>
         </div>
-        <div class="font-mono font-bold text-slate-200 shrink-0 ml-2" id="carousel-volume-text">--</div>
+        <div class="font-mono font-bold text-slate-200 shrink-0 ml-2 cursor-pointer hover:text-teal-300 flex items-center gap-1" id="carousel-volume-text" onclick="showTermHelp('units', event)" title="Erklärung zu Trainingsvolumen & Einheiten">--</div>
       </div>
 
       <!-- 7 Day Workout Cards Carousel -->
@@ -863,15 +923,21 @@ def index():
     <!-- ================= TAB 3: MAKROZYKLUS (Screen 4) ================= -->
     <div id="view-makro" class="hidden flex flex-col gap-4 sm:gap-5">
       <div>
-        <h2 class="text-base sm:text-lg font-bold tracking-tight text-white">Makrozyklus (Bird's-Eye-View)</h2>
+        <div class="flex items-center gap-2">
+          <h2 class="text-base sm:text-lg font-bold tracking-tight text-white">Makrozyklus (Bird's-Eye-View)</h2>
+          <button type="button" onclick="showTermHelp('phases', event)" class="w-3.5 h-3.5 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white flex items-center justify-center text-[9px] font-bold transition shrink-0" title="Erklärung zu Makrozyklus & Periodisierungs-Phasen">?</button>
+        </div>
         <p class="text-xs text-slate-400">Vollständige Periodisierung & Phasenverlauf</p>
       </div>
 
       <!-- Macro Volume Chart Canvas -->
       <section class="glass-card rounded-2xl p-3.5 sm:p-4 border border-slate-800/80">
         <div class="flex justify-between items-center mb-2">
-          <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Wöchentliche Volumen-Kurve</span>
-          <span id="macro-volume-unit-label" class="text-[10px] text-teal-400 font-mono">Volumen</span>
+          <div class="flex items-center gap-1.5">
+            <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Wöchentliche Volumen-Kurve</span>
+            <button type="button" onclick="showTermHelp('units', event)" class="w-3.5 h-3.5 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white flex items-center justify-center text-[9px] font-bold transition shrink-0" title="Erklärung zum wöchentlichen Volumen">?</button>
+          </div>
+          <button type="button" id="macro-volume-unit-label" onclick="showTermHelp('units', event)" class="text-[10px] text-teal-400 font-mono hover:underline cursor-pointer" title="Erklärung zu Einheiten">Volumen</button>
         </div>
         <div class="h-36 w-full relative">
           <canvas id="macroVolumeChart"></canvas>
@@ -905,11 +971,17 @@ def index():
 
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3 text-xs">
           <div>
-            <label class="block text-[10px] uppercase tracking-wider text-slate-400 mb-1 font-semibold">Ruhepuls (BPM)</label>
+            <label class="flex items-center gap-1 text-[10px] uppercase tracking-wider text-slate-400 mb-1 font-semibold">
+              <span>Ruhepuls (BPM)</span>
+              <button type="button" onclick="showTermHelp('resting_hr', event)" class="w-3 h-3 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white flex items-center justify-center text-[8px] font-bold" title="Erklärung zu Ruhepuls & BPM">?</button>
+            </label>
             <input id="input-resting-hr" type="number" placeholder="z.B. 48" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 font-mono text-xs focus:border-teal-500 outline-none">
           </div>
           <div>
-            <label class="block text-[10px] uppercase tracking-wider text-slate-400 mb-1 font-semibold">Max-Puls (BPM)</label>
+            <label class="flex items-center gap-1 text-[10px] uppercase tracking-wider text-slate-400 mb-1 font-semibold">
+              <span>Max-Puls (BPM)</span>
+              <button type="button" onclick="showTermHelp('max_hr', event)" class="w-3 h-3 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white flex items-center justify-center text-[8px] font-bold" title="Erklärung zu Max-Puls & Herzfrequenzzonen">?</button>
+            </label>
             <input id="input-max-hr" type="number" placeholder="z.B. 185" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 font-mono text-xs focus:border-teal-500 outline-none">
           </div>
           <div>
@@ -917,14 +989,20 @@ def index():
             <input id="input-weight" type="number" step="0.5" placeholder="z.B. 74.5" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 font-mono text-xs focus:border-teal-500 outline-none">
           </div>
           <div>
-            <label class="block text-[10px] uppercase tracking-wider text-slate-400 mb-1 font-semibold">Rad FTP (Watt)</label>
+            <label class="flex items-center gap-1 text-[10px] uppercase tracking-wider text-slate-400 mb-1 font-semibold">
+              <span>Rad FTP (Watt)</span>
+              <button type="button" onclick="showTermHelp('ftp', event)" class="w-3 h-3 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white flex items-center justify-center text-[8px] font-bold" title="Erklärung zu FTP (Functional Threshold Power)">?</button>
+            </label>
             <input id="input-ftp" type="number" placeholder="z.B. 250" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 font-mono text-xs focus:border-teal-500 outline-none">
           </div>
         </div>
 
         <div class="pt-2 border-t border-slate-800 flex items-center justify-between gap-3">
           <div class="min-w-0">
-            <div class="text-xs font-semibold text-slate-200">Female Cycle Tracking</div>
+            <div class="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+              <span>Female Cycle Tracking</span>
+              <button type="button" onclick="showTermHelp('cycle', event)" class="w-3.5 h-3.5 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white flex items-center justify-center text-[9px] font-bold" title="Erklärung zum Menstruationszyklus-Tracking">?</button>
+            </div>
             <div class="text-[10px] text-slate-400 break-words">Passt Engine-Sensitivität in Lutealphase für RPE & Puls automatisch an</div>
           </div>
           <input id="input-cycle-toggle" type="checkbox" class="w-4 h-4 rounded text-teal-600 bg-slate-900 border-slate-700 focus:ring-teal-500 shrink-0">
@@ -935,11 +1013,17 @@ def index():
       <section class="glass-card rounded-2xl p-4 sm:p-5 border border-slate-800">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 mb-3">
           <div>
-            <h3 id="zones-title" class="font-bold text-sm text-white">Daniels VDOT Trainingszonen</h3>
+            <div class="flex items-center gap-2">
+              <h3 id="zones-title" class="font-bold text-sm text-white">Daniels VDOT Trainingszonen</h3>
+              <button type="button" onclick="showCurrentSportZoneHelp(event)" class="w-3.5 h-3.5 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white flex items-center justify-center text-[9px] font-bold transition shrink-0" title="Erklärung zum sportartspezifischen Zonenmodell">?</button>
+            </div>
             <p id="zones-subtitle" class="text-[11px] text-slate-400">Paces nach Jack Daniels Running Formula</p>
           </div>
           <div class="flex items-center gap-2 self-start sm:self-auto">
-            <span id="zones-ref-label" class="text-xs text-slate-400 font-mono">VDOT:</span>
+            <div class="flex items-center gap-1">
+              <span id="zones-ref-label" class="text-xs text-slate-400 font-mono">VDOT:</span>
+              <button type="button" onclick="showCurrentSportZoneHelp(event)" class="w-3 h-3 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white flex items-center justify-center text-[8px] font-bold shrink-0" title="Erklärung zum Referenzwert">?</button>
+            </div>
             <input id="input-vdot-val" type="number" step="0.5" class="w-16 bg-slate-950 border border-slate-700 rounded p-1 text-center font-mono text-xs text-teal-400 font-bold focus:border-teal-500 outline-none" value="48.0">
             <button onclick="recalculateZonesBtn()" class="px-2.5 py-1 rounded bg-teal-500/20 hover:bg-teal-500/30 text-teal-300 border border-teal-500/30 text-[11px] font-semibold transition shrink-0">
               Neu berechnen
@@ -983,42 +1067,19 @@ def index():
 
   <!-- Screen 7: "Wie geht's dir?" Modal -->
   <div id="status-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
-    <div class="glass-card bg-slate-900 border border-slate-700 w-full max-w-md rounded-2xl p-6 shadow-2xl">
-      <div class="flex justify-between items-center mb-3">
-        <h3 class="text-lg font-bold flex items-center gap-2">
+    <div class="glass-card bg-slate-900 border border-slate-700 w-full max-w-md rounded-2xl p-6 shadow-2xl relative max-h-[90vh] overflow-y-auto">
+      <div class="flex justify-between items-center mb-2">
+        <h3 id="status-modal-title" class="text-lg font-bold flex items-center gap-2">
           <span>🩺</span> Wie geht's dir?
         </h3>
         <button onclick="closeStatusModal()" class="text-slate-400 hover:text-white text-sm">✕</button>
       </div>
-      <p class="text-xs text-slate-400 mb-4">Wähle deinen aktuellen Gesundheitsstatus für automatische Anpassungen deines Trainingsplans:</p>
+      <p id="status-modal-subtitle" class="text-xs text-slate-400 mb-4">Wähle deinen aktuellen Gesundheitsstatus für automatische Anpassungen deines Trainingsplans:</p>
       
-      <div class="flex flex-col gap-2.5">
-        <button onclick="submitStatusUpdate('recovery', 'Vollständig genesen')" class="p-3 rounded-xl bg-slate-950/70 border border-emerald-500/30 hover:border-emerald-500 hover:bg-emerald-950/20 text-left transition flex items-start gap-3 group">
-          <span class="text-xl">🌱</span>
-          <div>
-            <div class="text-sm font-semibold text-emerald-400 group-hover:text-emerald-300">Wieder gesund (Recovery)</div>
-            <div class="text-xs text-slate-400 mt-0.5">Aktiviert Wiederaufbau: 1. Training 50% Volumen, 4 Tage kein Tempotraining.</div>
-          </div>
-        </button>
+      <!-- Dynamically populated via renderStatusModalContent() -->
+      <div id="status-modal-body"></div>
 
-        <button onclick="submitStatusUpdate('pain_resolved', 'Schmerzen vollständig abgeklungen')" class="p-3 rounded-xl bg-slate-950/70 border border-teal-500/30 hover:border-teal-500 hover:bg-teal-950/20 text-left transition flex items-start gap-3 group">
-          <span class="text-xl">🩹</span>
-          <div>
-            <div class="text-sm font-semibold text-teal-400 group-hover:text-teal-300">Schmerzfrei (Pain Resolved)</div>
-            <div class="text-xs text-slate-400 mt-0.5">Beendet Schmerzpause, stellt geplante Einheiten als Easy-Runs wieder her.</div>
-          </div>
-        </button>
-
-        <button onclick="submitStatusUpdate('readiness', 'Akute Erschöpfung / Schlechter Schlaf', 8)" class="p-3 rounded-xl bg-slate-950/70 border border-amber-500/30 hover:border-amber-500 hover:bg-amber-950/20 text-left transition flex items-start gap-3 group">
-          <span class="text-xl">💤</span>
-          <div>
-            <div class="text-sm font-semibold text-amber-400 group-hover:text-amber-300">Erschöpft / Müde (Fatigue)</div>
-            <div class="text-xs text-slate-400 mt-0.5">Drosselt Tempo- & Intervall-Einheiten der nächsten 48h auf Zone Easy.</div>
-          </div>
-        </button>
-      </div>
-
-      <div class="flex justify-end mt-4">
+      <div class="flex justify-end mt-4 pt-2 border-t border-slate-800/80">
         <button onclick="closeStatusModal()" class="px-4 py-2 text-xs font-medium text-slate-400 hover:text-white">Schließen</button>
       </div>
     </div>
@@ -1074,11 +1135,17 @@ def index():
               <input id="guided-weeks" type="number" value="16" min="4" max="32" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 font-mono text-xs focus:border-teal-500 outline-none">
             </div>
             <div>
-              <label id="guided-volume-label" class="block text-[10px] uppercase text-slate-400 font-semibold mb-1 truncate">Basis (km/W)</label>
+              <label id="guided-volume-label" class="flex items-center gap-1 text-[10px] uppercase text-slate-400 font-semibold mb-1 truncate">
+                <span>Basis (km/W)</span>
+                <button type="button" onclick="showTermHelp('units', event)" class="w-3 h-3 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white flex items-center justify-center text-[8px] font-bold" title="Erklärung zu Volumen & Einheiten">?</button>
+              </label>
               <input id="guided-volume" type="number" value="30" min="1" max="15000" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 font-mono text-xs focus:border-teal-500 outline-none">
             </div>
             <div>
-              <label id="guided-vdot-label" class="block text-[10px] uppercase text-slate-400 font-semibold mb-1 truncate">VDOT / Fitness</label>
+              <label id="guided-vdot-label" class="flex items-center gap-1 text-[10px] uppercase text-slate-400 font-semibold mb-1 truncate">
+                <span>VDOT / Fitness</span>
+                <button type="button" onclick="showCurrentSportOnboardHelp(event)" class="w-3 h-3 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white flex items-center justify-center text-[8px] font-bold" title="Erklärung zu VDOT / Fitness-Index">?</button>
+              </label>
               <input id="guided-vdot" type="number" step="0.5" value="46.0" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 font-mono text-xs focus:border-teal-500 outline-none">
             </div>
           </div>
@@ -1124,6 +1191,63 @@ def index():
     </div>
   </div>
 
+  <!-- Screen: Interactive Glossar & Abkürzungshilfe Modal -->
+  <div id="glossary-modal" class="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 hidden" onclick="onGlossaryBackdropClick(event)">
+    <div class="glass-card bg-slate-900 border border-slate-700 w-full max-w-xl rounded-2xl p-4 sm:p-6 shadow-2xl flex flex-col max-h-[90vh] overflow-hidden" onclick="event.stopPropagation()">
+      <!-- Header -->
+      <div class="flex justify-between items-start mb-3 pb-3 border-b border-slate-800">
+        <div>
+          <h3 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+            <span>📖</span> Abkürzungen & Sportwissenschaft
+          </h3>
+          <p class="text-xs text-slate-400 mt-0.5">Kurzerklärungen aller Metriken, Zonen & Trainingsbegriffe</p>
+        </div>
+        <button onclick="closeGlossaryModal()" class="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition text-base">✕</button>
+      </div>
+
+      <!-- Focused Term Highlight Banner (When opened for a specific term) -->
+      <div id="glossary-highlight-banner" class="hidden mb-3 p-2.5 rounded-xl bg-teal-950/50 border border-teal-500/40 text-xs text-teal-200 flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="text-teal-400 font-bold text-base shrink-0">💡</span>
+          <span class="truncate">Fokussierte Erklärung: <strong id="glossary-highlight-term" class="text-white font-mono">--</strong></span>
+        </div>
+        <button onclick="showAllGlossaryTerms()" class="text-[11px] text-teal-400 hover:text-teal-200 underline shrink-0 font-medium">Alle anzeigen</button>
+      </div>
+
+      <!-- Search Bar -->
+      <div class="relative mb-3">
+        <input id="glossary-search" type="text" oninput="filterGlossary(this.value)" placeholder="Suche Abkürzung oder Begriff (z.B. CTL, VDOT, FTP, RPE, TSB...)"
+               class="w-full bg-slate-950 border border-slate-700 rounded-xl py-2 pl-9 pr-8 text-xs sm:text-sm text-slate-200 focus:outline-none focus:border-teal-500 placeholder-slate-500 transition">
+        <svg class="w-4 h-4 text-slate-500 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+        <button id="glossary-clear-btn" onclick="clearGlossarySearch()" class="hidden absolute right-2.5 top-2 text-slate-400 hover:text-white text-xs">✕</button>
+      </div>
+
+      <!-- Category Filter Chips -->
+      <div class="flex items-center gap-1.5 overflow-x-auto pb-2 mb-2 hide-scrollbar shrink-0 text-[11px]">
+        <button onclick="setGlossaryCategory('all')" id="cat-btn-all" class="px-2.5 py-1 rounded-lg bg-teal-500/20 text-teal-300 font-semibold border border-teal-500/40 shrink-0">Alle</button>
+        <button onclick="setGlossaryCategory('pmc')" id="cat-btn-pmc" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 shrink-0">📈 Belastung (PMC)</button>
+        <button onclick="setGlossaryCategory('running')" id="cat-btn-running" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 shrink-0">🏃 Laufen (VDOT)</button>
+        <button onclick="setGlossaryCategory('cycling')" id="cat-btn-cycling" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 shrink-0">🚴 Rad & Schwimmen</button>
+        <button onclick="setGlossaryCategory('strength')" id="cat-btn-strength" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 shrink-0">🏋️ Kraft & RPE</button>
+        <button onclick="setGlossaryCategory('periodization')" id="cat-btn-periodization" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 shrink-0">📅 Phasen & Makro</button>
+        <button onclick="setGlossaryCategory('vitals')" id="cat-btn-vitals" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 shrink-0">💓 Puls & Vital</button>
+      </div>
+
+      <!-- Scrollable List of Terms -->
+      <div id="glossary-list" class="flex flex-col gap-2.5 overflow-y-auto pr-1 flex-1">
+        <!-- Dynamically rendered by JS -->
+      </div>
+
+      <!-- Footer Close Button & Counter -->
+      <div class="mt-3 pt-3 border-t border-slate-800 flex justify-between items-center text-xs text-slate-400">
+        <span id="glossary-count-label">-- Begriffe</span>
+        <button onclick="closeGlossaryModal()" class="px-4 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium transition">
+          Schließen
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Bottom Tab Bar Navigation (§10 UX) -->
   <nav class="fixed bottom-0 left-0 right-0 z-40 bg-slate-900/90 backdrop-blur-md border-t border-slate-800/80 flex justify-center">
     <div class="w-full max-w-xl grid grid-cols-4 py-2 text-center text-xs">
@@ -1150,6 +1274,429 @@ def index():
   </nav>
 
   <script>
+    const GLOSSARY = {
+      ctl: {
+        term: "CTL",
+        fullName: "Chronic Training Load (Fitness)",
+        category: "pmc",
+        categoryLabel: "Belastung (PMC)",
+        short: "Deine langfristige Fitnessbasis über die letzten ca. 42 Tage.",
+        detail: "CTL ist der exponentiell gewichtete Durchschnitt deiner täglichen Belastung (TSS) der vergangenen 6 Wochen (~42 Tage). Er repräsentiert deine aerobe Kapazität und physiologische Belastbarkeit. Je höher der Wert, desto mehr Trainingsvolumen verkraftet dein Körper.",
+        guide: "Empfohlener Anstieg (Ramp Rate): ca. +3 bis +7 Punkte pro Woche. Ein zu schneller Anstieg (> +8/Woche) führt häufig zu Übertraining oder Sehnenproblemen."
+      },
+      atl: {
+        term: "ATL",
+        fullName: "Acute Training Load (Fatigue / Ermüdung)",
+        category: "pmc",
+        categoryLabel: "Belastung (PMC)",
+        short: "Deine kurzfristige Ermüdung über die letzten ca. 7 Tage.",
+        detail: "ATL ist der exponentiell gewichtete Durchschnitt deiner Trainingsbelastung der letzten 7 Tage. Harte Intervalle oder lange Läufe lassen die ATL sprunghaft ansteigen.",
+        guide: "Hohe ATL = schwere Beine. Nach Ruhetagen oder Entlastungswochen sinkt die ATL rasch wieder ab, während die Fitness (CTL) langsamer abgebaut wird."
+      },
+      tsb: {
+        term: "TSB",
+        fullName: "Training Stress Balance (Form / Frische)",
+        category: "pmc",
+        categoryLabel: "Belastung (PMC)",
+        short: "Formwert: TSB = CTL - ATL. Zeigt Frische vs. Erschöpfung.",
+        detail: "Die mathematische Differenz zwischen deiner langfristigen Fitness und der kurzfristigen Ermüdung. Zeigt direkt an, wie 'frisch' du bist.",
+        guide: "• Wettkampf-Form: +5 bis +20 (ausgeruht, spritzig & schnell)<br>• Aufbau-Training: -10 bis -25 (produktiver Trainingsreiz)<br>• Überlastung / Vorsicht: Unter -30 (hohes Verletzungsrisiko, Ruhetag einlegen!)"
+      },
+      pmc: {
+        term: "PMC",
+        fullName: "Performance Management Chart",
+        category: "pmc",
+        categoryLabel: "Belastung (PMC)",
+        short: "Wissenschaftliches Steuerungsmodell für Training & Form.",
+        detail: "Kombiniert CTL (Fitness), ATL (Ermüdung) und TSB (Form) in einer fortlaufenden Zeitreihe. Entwickelt von Dr. Andrew Coggan, um Trainingspläne exakt auf einen Wettkampftag hin zuzuspitzen (Tapering) und Überlastung frühzeitig zu erkennen.",
+        guide: "Ziel: Bis 2 Wochen vor dem Event CTL maximieren, dann durch Reduktion des Volumens ATL senken, sodass TSB am Wettkampftag im positiven Bereich (+5 bis +15) landet."
+      },
+      tss: {
+        term: "TSS",
+        fullName: "Training Stress Score",
+        category: "pmc",
+        categoryLabel: "Belastung (PMC)",
+        short: "Punktwert für die physiologische Gesamtschwere einer Einheit.",
+        detail: "Kombiniert Trainingsdauer und Intensität in eine einzige Kennzahl. Als Referenz gilt: Genau 1 Stunde All-Out an der anaeroben Schwelle (bzw. FTP) entspricht 100 TSS.",
+        guide: "• 30–50 TSS: Leichte Regeneration<br>• 50–100 TSS: Solides Training, am Folgetag meist erholt<br>• 100–180 TSS: Sehr fordernde Einheit, Ermüdung spürbar<br>• 180+ TSS: Extrem belastend, erfordert 2 Tage Regeneration"
+      },
+      vdot: {
+        term: "VDOT",
+        fullName: "Jack Daniels VDOT (Lauf-Formwert)",
+        category: "running",
+        categoryLabel: "Laufen (VDOT)",
+        short: "Fitness-Index für Läufer zur Berechnung aller Trainings-Paces.",
+        detail: "Vom renommierten Sportwissenschaftler Dr. Jack Daniels ('Running Formula') entwickelt. Berechnet aus einer aktuellen Wettkampfzeit (z.B. 5k, 10k oder Halbmarathon) deine relative Sauerstoffaufnahme und leitet daraus deine optimalen Trainingsgeschwindigkeiten ab.",
+        guide: "Verhindert 'Junk Miles': Du trainierst jede Einheit (Easy, Marathon, Schwelle, Intervall) im physiologisch exakten Tempobereich."
+      },
+      epace: {
+        term: "E-Pace",
+        fullName: "Easy Pace (Grundlagenausdauer GA1)",
+        category: "running",
+        categoryLabel: "Laufen (VDOT)",
+        short: "Lockeres Grundlagen- und Regenerationstempo (ca. 65–79% HFmax).",
+        detail: "Macht 75–80% deines gesamten Laufvolumens aus. Trainiert die Kapillarisierung im Muskelgewebe, vermehrt Mitochondrien (die 'Kraftwerke' der Zellen) und trainiert die Fettverbrennung.",
+        guide: "Goldene Regel: 'Talk Test' – du musst dich während des Laufens locker in vollständigen Sätzen unterhalten können. Wenn du nach Luft schnappst, bist du zu schnell!"
+      },
+      mpace: {
+        term: "M-Pace",
+        fullName: "Marathon Pace (Wettkampftempo)",
+        category: "running",
+        categoryLabel: "Laufen (VDOT)",
+        short: "Geplantes Marathon-Renntempo (ca. 80–87% HFmax).",
+        detail: "Etwas zügiger als Easy Pace. Dient der physiologischen und mentalen Gewöhnung an das spezifische Marathon-Renntempo und testet den Glykogenverbrauch unter Rennbedingungen.",
+        guide: "Wird meistens in Blöcken in den langen Sonntags-Dauerlauf (Long Run) integriert."
+      },
+      tpace: {
+        term: "T-Pace",
+        fullName: "Threshold Pace (Laktatschwelle GA2)",
+        category: "running",
+        categoryLabel: "Laufen (VDOT)",
+        short: "Schwellentempo (ca. 88–92% HFmax). 'Comfortably Hard'.",
+        detail: "Die anaerobe Laktatschwelle – die maximale Intensität, bei der Laktataufbau und Laktatabbau gerade noch im Gleichgewicht stehen. Tempo, das man ca. 50–60 Minuten im Rennen halten könnte.",
+        guide: "Schult den Körper darin, Laktat effizient abzutransportieren und zu recyceln. Typisch: 20-minütige Tempoläufe oder Cruise-Intervalle (z.B. 4x 2 km mit 1 min Trabpause)."
+      },
+      ipace: {
+        term: "I-Pace",
+        fullName: "Interval Pace (VO2max-Tempo)",
+        category: "running",
+        categoryLabel: "Laufen (VDOT)",
+        short: "Harte Intervalle zur Steigerung der max. Sauerstoffaufnahme (95–100% HFmax).",
+        detail: "Tempo für 3- bis 5-minütige Belastungen (z.B. 800m bis 1200m). Da das Herz-Kreislauf-System ca. 1,5 bis 2 Minuten braucht, um VO2max zu erreichen, sind Intervalle dieser Länge optimal.",
+        guide: "Sehr anstrengend (RPE 8–9). Trabpause sollte ca. gleich lang wie die Belastungszeit sein, damit das nächste Intervall im Zielkorridor geschafft wird."
+      },
+      rpace: {
+        term: "R-Pace",
+        fullName: "Repetition Pace (Schnelligkeit & Ökonomie)",
+        category: "running",
+        categoryLabel: "Laufen (VDOT)",
+        short: "Sehr schnelle Wiederholungen (200m bis 400m) mit voller Gehpause.",
+        detail: "Dient nicht dem Ausdaueraufbau, sondern der Verbesserung von Schrittfrequenz, Laufökonomie und neuromuskulärer Ansteuerung.",
+        guide: "Lange Erholungspause zwischen den Läufen! Du solltest vor jedem Repetition-Lauf wieder voll durchatmen können. Saubere Technik steht an oberster Stelle."
+      },
+      ftp: {
+        term: "FTP",
+        fullName: "Functional Threshold Power (Rad)",
+        category: "cycling",
+        categoryLabel: "Rad & Schwimmen",
+        short: "Funktionelle Schwellenleistung beim Radfahren in Watt.",
+        detail: "Die maximale Durchschnittsleistung in Watt, die du über eine Stunde gleichmäßig auf das Pedal bringen kannst. Ermittelt über einen 20-Minuten-Test (95% des Schnitts) oder Stufentest.",
+        guide: "Alle Rad-Zonen (Z1 Erholung bis Z7 Sprint) sowie der Bike-TSS (bTSS) basieren prozentual auf diesem Watt-Wert."
+      },
+      css: {
+        term: "CSS",
+        fullName: "Critical Swim Speed (Schwimm-Schwelle)",
+        category: "cycling",
+        categoryLabel: "Rad & Schwimmen",
+        short: "Kritische Schwellen-Pace beim Schwimmen (Pace pro 100m).",
+        detail: "Deine anaerobe Schwimmschwelle in Sekunden pro 100 Meter. Sie entspricht der Geschwindigkeit, die du über eine 1500m-Distanz ohne fortschreitende Übersäuerung halten kannst.",
+        guide: "Ermittelt aus zwei Time Trials (400m & 200m Vollgas). CSS = (t400 - t200) / 2. Zonen orientieren sich an dieser Baseline."
+      },
+      onerm: {
+        term: "1RM",
+        fullName: "One-Repetition Maximum (Maximalkraft)",
+        category: "strength",
+        categoryLabel: "Kraft & RPE",
+        short: "Das Maximalgewicht für genau eine saubere Wiederholung.",
+        detail: "Die maximale Last, die du in einer Grundübung (Kniebeuge, Bankdrücken, Kreuzheben, Schulterdrücken) für exakt eine Wiederholung technisch einwandfrei bewegen kannst.",
+        guide: "Trainingsgewichte werden oft in % 1RM angegeben (z.B. 70–80% 1RM für Muskelaufbau, 85–90%+ für reine Maximalkraft)."
+      },
+      rpe: {
+        term: "RPE",
+        fullName: "Rating of Perceived Exertion (Belastungsskala)",
+        category: "strength",
+        categoryLabel: "Kraft & RPE",
+        short: "Subjektive Belastungsskala von 1 bis 10.",
+        detail: "• 1–2: Sehr leicht (Spaziergang, lockeres Dehnen)<br>• 3–4: Leicht bis moderat (Lockeres Redetempo, Easy Pace)<br>• 5–6: Zügig (Marathon-Pace, spürbare Atmung)<br>• 7–8: Schwellenbereich ('angenehm hart', man spricht nur kurze Wortgruppen)<br>• 9: Hartes Intervall (Brennen der Muskulatur, hohe Atemfrequenz)<br>• 10: All-Out Maximalbelastung / Muskelversagen",
+        guide: "Nutze die RPE-Angabe im täglichen Check-in, damit OmniTrain deinen Plan automatisch drosselt, wenn Einheiten schwerer fallen als geplant."
+      },
+      rir: {
+        term: "RIR",
+        fullName: "Reps in Reserve (Krafttraining)",
+        category: "strength",
+        categoryLabel: "Kraft & RPE",
+        short: "Verbleibende Wiederholungen im Tank vor dem Muskelversagen.",
+        detail: "Gibt an, wie viele saubere Wiederholungen du am Ende eines Kraftsatzes noch hättest ausführen können, bevor das Gewicht nicht mehr hochgeht.",
+        guide: "• RIR 3: Sehr sauber, viel Reserve (Technik- oder Warm-up-Satz)<br>• RIR 1–2: Der wissenschaftliche Sweet Spot für optimalen Muskelaufbau ohne ZNS-Erschöpfung<br>• RIR 0: Absolutes Muskelversagen"
+      },
+      dup: {
+        term: "DUP",
+        fullName: "Daily Undulating Periodization",
+        category: "strength",
+        categoryLabel: "Kraft & RPE",
+        short: "Tägliche wellenförmige Periodisierung im Krafttraining.",
+        detail: "Statt wochenlang dasselbe Schema zu trainieren, wechseln Intensität und Wiederholungsbereich von Training zu Training ab (z.B. Hypertrophie 8–12 Wdh, Maximalkraft 3–5 Wdh, Kraftausdauer 15+ Wdh).",
+        guide: "Erzeugt unterschiedliche physiologische Anpassungen in derselben Woche und beugt Stagnation (Plateaus) nachweislich vor."
+      },
+      bpm: {
+        term: "BPM",
+        fullName: "Beats per Minute (Herzfrequenz / Puls)",
+        category: "vitals",
+        categoryLabel: "Puls & Vital",
+        short: "Herzschläge pro Minute. Grundbaustein für Puls-Trainingszonen.",
+        detail: "Zeigt die Arbeitsleistung deines Herzmuskels. Zwei Schlüsselwerte steuern deinen Trainingsplan: Ruhepuls (Erholung) und Maximalpuls (Ausbelastung).",
+        guide: "Puls reagiert verzögert auf Tempoänderungen (Cardiac Lag) und wird durch Hitze, Dehydrierung oder Koffein beeinflusst."
+      },
+      resting_hr: {
+        term: "Ruhepuls",
+        fullName: "Ruhe-Herzfrequenz (Morgenpuls in BPM)",
+        category: "vitals",
+        categoryLabel: "Puls & Vital",
+        short: "Niedrigste Herzfrequenz im wachen, entspannten Zustand.",
+        detail: "Am besten morgens direkt nach dem Aufwachen oder über die Schlafanalyse deiner Sportuhr (Garmin Fenix) gemessen. Sinkt mit zunehmender aerober Fitness durch größeres Schlagvolumen des Herzens.",
+        guide: "Liegt dein Ruhepuls an 2 aufeinanderfolgenden Tagen um >5 BPM über deinem normalen Durchschnitt, ist dein Körper gestresst (beginnender Infekt, schlechte Erholung oder Übertraining)."
+      },
+      max_hr: {
+        term: "Max-Puls",
+        fullName: "Maximale Herzfrequenz (HRmax in BPM)",
+        category: "vitals",
+        categoryLabel: "Puls & Vital",
+        short: "Höchste Herzfrequenz, die unter maximaler Belastung erreicht wird.",
+        detail: "Ein individueller anatomischer Wert (nicht durch Training steigerbar, sinkt mit dem Alter). Dient als 100%-Referenz für prozentuale Pulszonen (Zone 1 bis Zone 5).",
+        guide: "Sollte durch einen echten Ausbelastungstest (z.B. 3x Bergan-Sprint All-Out) ermittelt werden, da Standardformeln ('220 minus Alter') oft um bis zu 15 BPM abweichen."
+      },
+      cycle: {
+        term: "Cycle",
+        fullName: "Female Cycle Tracking (Zyklus-Adaption)",
+        category: "vitals",
+        categoryLabel: "Puls & Vital",
+        short: "Automatische Anpassung an Follikel- und Lutealphase.",
+        detail: "In der Lutealphase (nach dem Eisprung) steigen Körperkerntemperatur und Ruhepuls leicht an, während die Erholungsfähigkeit sinkt. In der Follikelphase ist die Kraft- und Glykogenverwertung oft gesteigert.",
+        guide: "OmniTrain berücksichtigt dies bei aktivierter Option und passt Sensitivitätsschwellen für Erschöpfung und RPE an."
+      },
+      phases: {
+        term: "Phasen",
+        fullName: "Periodisierungs-Phasen (Base · Build · Peak · Taper)",
+        category: "periodization",
+        categoryLabel: "Phasen & Makro",
+        short: "Die 4 Phasen eines sportwissenschaftlichen Makrozyklus.",
+        detail: "• BASE (Grundlage): Hoher Umfang bei geringer Intensität zum Aufbau der aeroben Kapazität und Gelenk-Stabilität.<br>• BUILD (Aufbau): Gezielte Steigerung von Intensität, Tempoläufen und Schwellen-Intervallen.<br>• PEAK (Spitzenform): Wettkampfspezifische Härte bei stabilisiertem Gesamtumfang.<br>• TAPER (Zuspitzung): Reduktion des Volumens um 40–50% bei gleichbleibender Intensität zum Abbau der Ermüdung vor dem Wettkampf.",
+        guide: "OmniTrain strukturiert Wochenpläne automatisch in diese Phasen und baut im 3:1 Rhythmus geplante Entlastungswochen ein."
+      },
+      deload: {
+        term: "Deload",
+        fullName: "Entlastungswoche / Regenerationswoche",
+        category: "periodization",
+        categoryLabel: "Phasen & Makro",
+        short: "Geplante Reduktion des Wochenvolumens um ca. 25%.",
+        detail: "Nach typischerweise 3 fordernden Belastungswochen folgt eine Entlastungswoche mit reduzierter Kilometerzahl. In dieser Woche repariert der Körper Muskelmikroschäden und stärkt Sehnen und Bänder.",
+        guide: "Echtes Muskel- und Ausdauerwachstum geschieht in der Erholung (Superkompensation). Ohne Deload-Wochen drohen Stagnation und Überlastungsverletzungen."
+      },
+      units: {
+        term: "Einheiten",
+        fullName: "Sportartspezifische Volumen- & Metrik-Einheiten",
+        category: "periodization",
+        categoryLabel: "Phasen & Makro",
+        short: "km/W · min/W · m/W · Sätze/W · TSS/W",
+        detail: "• km/W: Kilometer pro Woche (Laufen)<br>• min/W: Netto-Fahrzeit in Minuten pro Woche (Radsport)<br>• m/W: Gesamtdistanz in Metern pro Woche (Schwimmen)<br>• Sätze/W: Anzahl schwerer Arbeitssätze pro Muskelgruppe pro Woche (Krafttraining)<br>• TSS/W: Kumulierte Trainingsbelastungspunkte aller Sportarten (Multi-Sport / Triathlon)",
+        guide: "OmniTrain stellt Kennzahlen, Kurven und Berechnungen immer in der passenden Maßeinheit deiner Sportart dar."
+      }
+    };
+
+    let currentGlossaryCategory = 'all';
+    let currentGlossarySearch = '';
+
+    function openGlossaryModal(preselectedKey = null) {
+      const modal = document.getElementById('glossary-modal');
+      modal.classList.remove('hidden');
+      document.body.style.overflow = 'hidden';
+
+      if (preselectedKey && GLOSSARY[preselectedKey]) {
+        const item = GLOSSARY[preselectedKey];
+        document.getElementById('glossary-highlight-banner').classList.remove('hidden');
+        document.getElementById('glossary-highlight-term').innerText = `${item.term} — ${item.fullName}`;
+        currentGlossaryCategory = 'all';
+        currentGlossarySearch = '';
+        document.getElementById('glossary-search').value = '';
+        updateCategoryChips();
+        renderGlossary(preselectedKey);
+        setTimeout(() => {
+          const card = document.getElementById(`glossary-card-${preselectedKey}`);
+          if (card) {
+            card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            card.classList.add('ring-2', 'ring-teal-400', 'bg-teal-950/40');
+            setTimeout(() => {
+              card.classList.remove('ring-2', 'ring-teal-400', 'bg-teal-950/40');
+            }, 2500);
+          }
+        }, 100);
+      } else {
+        document.getElementById('glossary-highlight-banner').classList.add('hidden');
+        renderGlossary();
+      }
+    }
+
+    function closeGlossaryModal() {
+      document.getElementById('glossary-modal').classList.add('hidden');
+      document.body.style.overflow = '';
+    }
+
+    function onGlossaryBackdropClick(e) {
+      if (e.target.id === 'glossary-modal') {
+        closeGlossaryModal();
+      }
+    }
+
+    function showTermHelp(key, event) {
+      if (event) {
+        event.stopPropagation();
+        event.preventDefault();
+      }
+      openGlossaryModal(key);
+    }
+
+    function showAllGlossaryTerms() {
+      document.getElementById('glossary-highlight-banner').classList.add('hidden');
+      document.getElementById('glossary-search').value = '';
+      currentGlossarySearch = '';
+      currentGlossaryCategory = 'all';
+      updateCategoryChips();
+      renderGlossary();
+    }
+
+    function setGlossaryCategory(cat) {
+      currentGlossaryCategory = cat;
+      updateCategoryChips();
+      renderGlossary();
+    }
+
+    function updateCategoryChips() {
+      const cats = ['all', 'pmc', 'running', 'cycling', 'strength', 'periodization', 'vitals'];
+      cats.forEach(c => {
+        const btn = document.getElementById(`cat-btn-${c}`);
+        if (btn) {
+          if (c === currentGlossaryCategory) {
+            btn.className = "px-2.5 py-1 rounded-lg bg-teal-500/20 text-teal-300 font-semibold border border-teal-500/40 shrink-0";
+          } else {
+            btn.className = "px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 shrink-0";
+          }
+        }
+      });
+    }
+
+    function filterGlossary(searchQuery) {
+      currentGlossarySearch = searchQuery.trim().toLowerCase();
+      const clearBtn = document.getElementById('glossary-clear-btn');
+      if (clearBtn) {
+        if (currentGlossarySearch) clearBtn.classList.remove('hidden');
+        else clearBtn.classList.add('hidden');
+      }
+      renderGlossary();
+    }
+
+    function clearGlossarySearch() {
+      document.getElementById('glossary-search').value = '';
+      currentGlossarySearch = '';
+      document.getElementById('glossary-clear-btn').classList.add('hidden');
+      renderGlossary();
+    }
+
+    function showCurrentSportZoneHelp(event) {
+      const curSport = appState && appState.active_plan ? appState.active_plan.sport_type : 'running';
+      if (curSport === 'cycling') showTermHelp('ftp', event);
+      else if (curSport === 'swimming') showTermHelp('css', event);
+      else if (curSport === 'strength') showTermHelp('dup', event);
+      else showTermHelp('vdot', event);
+    }
+
+    function showCurrentSportOnboardHelp(event) {
+      const sport = document.getElementById('guided-sport') ? document.getElementById('guided-sport').value : 'running';
+      if (sport === 'cycling') showTermHelp('ftp', event);
+      else if (sport === 'swimming') showTermHelp('css', event);
+      else if (sport === 'strength') showTermHelp('onerm', event);
+      else showTermHelp('vdot', event);
+    }
+
+    function renderGlossary(focusedKey = null) {
+      const container = document.getElementById('glossary-list');
+      if (!container) return;
+      container.innerHTML = '';
+
+      let keys = Object.keys(GLOSSARY);
+
+      // Category filter
+      if (currentGlossaryCategory !== 'all') {
+        keys = keys.filter(k => GLOSSARY[k].category === currentGlossaryCategory);
+      }
+
+      // Search query filter
+      if (currentGlossarySearch) {
+        const q = currentGlossarySearch;
+        keys = keys.filter(k => {
+          const item = GLOSSARY[k];
+          return item.term.toLowerCase().includes(q) ||
+                 item.fullName.toLowerCase().includes(q) ||
+                 item.short.toLowerCase().includes(q) ||
+                 item.detail.toLowerCase().includes(q) ||
+                 (item.guide && item.guide.toLowerCase().includes(q));
+        });
+      }
+
+      // If focusedKey is given and present, put it first
+      if (focusedKey && keys.includes(focusedKey)) {
+        keys = [focusedKey, ...keys.filter(k => k !== focusedKey)];
+      }
+
+      const countLabel = document.getElementById('glossary-count-label');
+      if (countLabel) {
+        countLabel.innerText = `${keys.length} ${keys.length === 1 ? 'Begriff' : 'Begriffe'} gefunden`;
+      }
+
+      if (keys.length === 0) {
+        container.innerHTML = `
+          <div class="py-8 text-center text-slate-500 text-xs italic">
+            Keine passenden Begriffe für "${currentGlossarySearch}" gefunden.<br>
+            <button onclick="showAllGlossaryTerms()" class="mt-2 text-teal-400 hover:underline">Alle Begriffe anzeigen</button>
+          </div>
+        `;
+        return;
+      }
+
+      keys.forEach(k => {
+        const item = GLOSSARY[k];
+        const isFocused = (k === focusedKey);
+        const card = document.createElement('div');
+        card.id = `glossary-card-${k}`;
+        card.className = `glass-pill p-3.5 sm:p-4 rounded-xl border ${isFocused ? 'border-teal-500/80 bg-teal-950/30' : 'border-slate-800/90'} hover:border-slate-700 transition flex flex-col gap-2`;
+
+        const formattedDetail = item.detail;
+        const formattedGuide = item.guide || '';
+
+        card.innerHTML = `
+          <div class="flex items-start justify-between gap-2">
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="font-mono font-bold text-teal-400 text-sm bg-teal-500/10 px-2 py-0.5 rounded border border-teal-500/30">${item.term}</span>
+                <span class="font-bold text-white text-xs sm:text-sm">${item.fullName}</span>
+              </div>
+              <span class="text-[11px] text-teal-300/90 font-medium mt-1 block">${item.short}</span>
+            </div>
+            <span class="text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-slate-800/80 text-slate-400 font-semibold shrink-0">${item.categoryLabel}</span>
+          </div>
+
+          <p class="text-xs text-slate-300 leading-relaxed mt-0.5">
+            ${formattedDetail}
+          </p>
+
+          ${item.guide ? `
+            <div class="mt-1 pt-2 border-t border-slate-800/80 bg-slate-950/50 rounded-lg p-2.5 text-[11px] text-slate-300 flex items-start gap-2">
+              <span class="text-amber-400 font-bold shrink-0">💡 Tipp / Richtwert:</span>
+              <span class="leading-relaxed">${formattedGuide}</span>
+            </div>
+          ` : ''}
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closeGlossaryModal();
+        closeStatusModal();
+        closeOnboardModal();
+      }
+    });
+
     let appState = null;
     let currentPlanId = null;
     let showArchivedPlans = false;
@@ -1309,12 +1856,42 @@ def index():
         });
       }
 
-      // Sick Banner
+      // Sick Banner & Pain Banner
       const sickBanner = document.getElementById('sick-banner');
-      if (appState.is_sick_mode) {
-        sickBanner.classList.remove('hidden');
-      } else {
-        sickBanner.classList.add('hidden');
+      if (sickBanner) {
+        if (appState.is_sick_mode) {
+          sickBanner.classList.remove('hidden');
+        } else {
+          sickBanner.classList.add('hidden');
+        }
+      }
+
+      const painBanner = document.getElementById('pain-banner');
+      if (painBanner) {
+        if (!appState.is_sick_mode && appState.is_pain_mode) {
+          painBanner.classList.remove('hidden');
+          const detailEl = document.getElementById('pain-banner-detail');
+          if (detailEl && appState.pain_detail) {
+            detailEl.innerText = `Workouts werden geschont: ${appState.pain_detail}`;
+          }
+        } else {
+          painBanner.classList.add('hidden');
+        }
+      }
+
+      // Header Status Button Dynamic Appearance
+      const statusBtn = document.getElementById('header-status-btn');
+      if (statusBtn) {
+        if (appState.is_sick_mode) {
+          statusBtn.className = "text-xs font-semibold px-2.5 sm:px-3 py-1.5 rounded-lg bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-rose-500/30 transition flex items-center gap-1.5 shrink-0 animate-pulse";
+          statusBtn.innerHTML = `<span>🤒</span> <span class="hidden xs:inline">Krankheitsmodus</span><span class="xs:hidden">Krank</span>`;
+        } else if (appState.is_pain_mode) {
+          statusBtn.className = "text-xs font-semibold px-2.5 sm:px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30 transition flex items-center gap-1.5 shrink-0";
+          statusBtn.innerHTML = `<span>🩹</span> <span class="hidden xs:inline">Schonmodus</span><span class="xs:hidden">Schonung</span>`;
+        } else {
+          statusBtn.className = "text-xs font-semibold px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700 transition flex items-center gap-1.5 shrink-0";
+          statusBtn.innerHTML = `<span>🩺</span> <span class="hidden xs:inline">Wie geht's dir?</span><span class="xs:hidden">Status</span>`;
+        }
       }
 
       // PMC Metrics
@@ -1696,8 +2273,25 @@ def index():
           target = `${z.intensity} (${z.rpe || ''} RPE)`;
         }
 
+        // Zone Help Mapping
+        let zoneHelpKey = null;
+        const lowerK = k.toLowerCase();
+        const zoneName = z.name || k;
+        const lowerName = zoneName.toLowerCase();
+
+        if (lowerK.includes('easy') || lowerK === 'e' || lowerName.includes('easy')) zoneHelpKey = 'epace';
+        else if (lowerK.includes('marathon') || lowerK === 'm' || lowerName.includes('marathon')) zoneHelpKey = 'mpace';
+        else if (lowerK.includes('threshold') || lowerK === 't' || lowerName.includes('schwelle') || lowerName.includes('threshold')) zoneHelpKey = 'tpace';
+        else if (lowerK.includes('interval') || lowerK === 'i' || lowerName.includes('interval')) zoneHelpKey = 'ipace';
+        else if (lowerK.includes('repetition') || lowerK === 'r' || lowerName.includes('repetition')) zoneHelpKey = 'rpace';
+        else if (curSport === 'cycling') zoneHelpKey = 'ftp';
+        else if (curSport === 'swimming') zoneHelpKey = 'css';
+        else if (curSport === 'strength') zoneHelpKey = 'dup';
+
+        const helpBtn = zoneHelpKey ? ` <button type="button" onclick="showTermHelp('${zoneHelpKey}', event)" class="inline-flex w-3.5 h-3.5 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white items-center justify-center text-[8px] font-bold transition align-middle ml-1 shrink-0" title="Erklärung zu dieser Zone">?</button>` : '';
+
         tr.innerHTML = `
-          <td class="py-2.5 font-bold text-teal-400">${z.name || k}</td>
+          <td class="py-2.5 font-bold text-teal-400 whitespace-nowrap">${zoneName}${helpBtn}</td>
           <td class="py-2.5 font-mono text-slate-200">${target}</td>
           <td class="py-2.5 text-slate-400">${z.description || (z.rir ? `${z.rir}, Pause: ${z.rest || ''}` : '-')}</td>
         `;
@@ -1958,11 +2552,249 @@ def index():
       }
     }
 
-    // Modal controls: "Wie geht's dir?"
-    function openStatusModal() { document.getElementById('status-modal').classList.remove('hidden'); }
-    function closeStatusModal() { document.getElementById('status-modal').classList.add('hidden'); }
+    // Modal controls: "Wie geht's dir?" (Dynamic State-Aware Modal)
+    let statusSubView = 'main'; // 'main', 'pain_form', 'fatigue_form'
 
-    async function submitStatusUpdate(type, note, severity = null) {
+    function openStatusModal() {
+      statusSubView = 'main';
+      renderStatusModalContent();
+      document.getElementById('status-modal').classList.remove('hidden');
+    }
+
+    function closeStatusModal() {
+      document.getElementById('status-modal').classList.add('hidden');
+    }
+
+    function renderStatusModalContent() {
+      const body = document.getElementById('status-modal-body');
+      const title = document.getElementById('status-modal-title');
+      const subtitle = document.getElementById('status-modal-subtitle');
+      if (!body) return;
+
+      const isSick = !!appState.is_sick_mode;
+      const isPain = !!appState.is_pain_mode;
+
+      if (isSick) {
+        title.innerHTML = '<span>🤒</span> Krankheitsmodus aktiv';
+        subtitle.innerText = 'Du bist aktuell krank gemeldet. Alle anstehenden Workouts sind als Ruhetage pausiert.';
+        body.innerHTML = `
+          <div class="flex flex-col gap-2.5">
+            <button onclick="submitStatusUpdate('recovery', 'Wieder gesund und symptomfrei!')" class="p-3.5 rounded-xl bg-slate-950/80 border border-emerald-500/40 hover:border-emerald-400 hover:bg-emerald-950/30 text-left transition flex items-start gap-3 group">
+              <span class="text-2xl">🌱</span>
+              <div>
+                <div class="text-sm font-semibold text-emerald-400 group-hover:text-emerald-300">Wieder gesund (Recovery)</div>
+                <div class="text-xs text-slate-300 mt-0.5">Startet sanften Wiederaufbau: 1. Training 50% Volumen, 4 Tage kein Tempotraining.</div>
+              </div>
+            </button>
+
+            <button onclick="closeStatusModal()" class="p-3 rounded-xl bg-slate-950/50 border border-slate-700 hover:border-slate-500 text-left transition flex items-start gap-3 group">
+              <span class="text-xl">⏸️</span>
+              <div>
+                <div class="text-sm font-semibold text-slate-300 group-hover:text-white">Weiterhin schonen</div>
+                <div class="text-xs text-slate-400 mt-0.5">Behält die Ruhephase bei, bis dein Körper wieder voll belastbar ist.</div>
+              </div>
+            </button>
+          </div>
+        `;
+        return;
+      }
+
+      if (isPain) {
+        title.innerHTML = '<span>🩹</span> Schonmodus aktiv';
+        const detailText = appState.pain_detail ? ` (${appState.pain_detail})` : '';
+        subtitle.innerText = `Aktuelle Einheiten sind wegen Beschwerden geschont oder pausiert${detailText}.`;
+        
+        if (statusSubView === 'pain_form') {
+          renderPainForm(body, title, subtitle, true);
+          return;
+        }
+
+        body.innerHTML = `
+          <div class="flex flex-col gap-2.5">
+            <button onclick="submitStatusUpdate('pain_resolved', 'Schmerzen vollständig abgeklungen')" class="p-3.5 rounded-xl bg-slate-950/80 border border-teal-500/40 hover:border-teal-400 hover:bg-teal-950/30 text-left transition flex items-start gap-3 group">
+              <span class="text-2xl">✨</span>
+              <div>
+                <div class="text-sm font-semibold text-teal-400 group-hover:text-teal-300">Schmerzfrei (Pain Resolved)</div>
+                <div class="text-xs text-slate-300 mt-0.5">Beendet die Schonphase, reaktiviert geplante Grundlageneinheiten.</div>
+              </div>
+            </button>
+
+            <button onclick="statusSubView = 'pain_form'; renderStatusModalContent();" class="p-3 rounded-xl bg-slate-950/60 border border-amber-500/30 hover:border-amber-500 hover:bg-amber-950/20 text-left transition flex items-start gap-3 group">
+              <span class="text-xl">📊</span>
+              <div>
+                <div class="text-sm font-semibold text-amber-400 group-hover:text-amber-300">Schmerzlevel anpassen</div>
+                <div class="text-xs text-slate-400 mt-0.5">Intensität oder betroffene Körperregion aktualisieren.</div>
+              </div>
+            </button>
+
+            <button onclick="submitStatusUpdate('sickness', 'Krank gemeldet (Infekt/Fieber)')" class="p-3 rounded-xl bg-slate-950/60 border border-rose-500/30 hover:border-rose-500 hover:bg-rose-950/20 text-left transition flex items-start gap-3 group">
+              <span class="text-xl">🤒</span>
+              <div>
+                <div class="text-sm font-semibold text-rose-400 group-hover:text-rose-300">Zusätzlich krank geworden</div>
+                <div class="text-xs text-slate-400 mt-0.5">Aktiviert vollen Krankheitsmodus und pausiert alle Einheiten.</div>
+              </div>
+            </button>
+          </div>
+        `;
+        return;
+      }
+
+      // Normal state (weder krank noch Schmerzmodus)
+      if (statusSubView === 'pain_form') {
+        renderPainForm(body, title, subtitle, false);
+        return;
+      }
+
+      if (statusSubView === 'fatigue_form') {
+        renderFatigueForm(body, title, subtitle);
+        return;
+      }
+
+      title.innerHTML = '<span>🩺</span> Wie geht\'s dir heute?';
+      subtitle.innerText = 'Wähle deinen aktuellen Status für eine bedarfsgerechte Anpassung des Trainingsplans:';
+      body.innerHTML = `
+        <div class="flex flex-col gap-2.5">
+          <button onclick="submitStatusUpdate('fit', 'Topfit und voll belastbar')" class="p-3 rounded-xl bg-slate-950/70 border border-emerald-500/30 hover:border-emerald-500 hover:bg-emerald-950/20 text-left transition flex items-start gap-3 group">
+            <span class="text-xl">⚡</span>
+            <div>
+              <div class="text-sm font-semibold text-emerald-400 group-hover:text-emerald-300">Topfit & Volle Energie</div>
+              <div class="text-xs text-slate-400 mt-0.5">Fühle mich ausgeruht und bereit für alle geplanten Trainingsreize.</div>
+            </div>
+          </button>
+
+          <button onclick="statusSubView = 'fatigue_form'; renderStatusModalContent();" class="p-3 rounded-xl bg-slate-950/70 border border-amber-500/30 hover:border-amber-500 hover:bg-amber-950/20 text-left transition flex items-start gap-3 group">
+            <span class="text-xl">💤</span>
+            <div>
+              <div class="text-sm font-semibold text-amber-400 group-hover:text-amber-300">Erschöpft / Schlechter Schlaf (Fatigue)</div>
+              <div class="text-xs text-slate-400 mt-0.5">Schwere Beine, wenig Schlaf oder hoher Stress (Drosselung nächste 24-48h).</div>
+            </div>
+          </button>
+
+          <button onclick="statusSubView = 'pain_form'; renderStatusModalContent();" class="p-3 rounded-xl bg-slate-950/70 border border-orange-500/30 hover:border-orange-500 hover:bg-orange-950/20 text-left transition flex items-start gap-3 group">
+            <span class="text-xl">🩹</span>
+            <div>
+              <div class="text-sm font-semibold text-orange-400 group-hover:text-orange-300">Schmerzen / Zwicken (Pain)</div>
+              <div class="text-xs text-slate-400 mt-0.5">Zwicken oder akuter Schmerz in Knie, Sehne oder Muskel.</div>
+            </div>
+          </button>
+
+          <button onclick="submitStatusUpdate('sickness', 'Krank gemeldet (Infekt/Fieber)')" class="p-3 rounded-xl bg-slate-950/70 border border-rose-500/30 hover:border-rose-500 hover:bg-rose-950/20 text-left transition flex items-start gap-3 group">
+            <span class="text-xl">🤒</span>
+            <div>
+              <div class="text-sm font-semibold text-rose-400 group-hover:text-rose-300">Krank / Erkältet (Sickness)</div>
+              <div class="text-xs text-slate-400 mt-0.5">Aktiviert Krankheitsmodus und wandelt anstehende Workouts in Ruhetage um.</div>
+            </div>
+          </button>
+        </div>
+      `;
+    }
+
+    function renderFatigueForm(container, title, subtitle) {
+      title.innerHTML = '<span>💤</span> Erschöpfung erfassen';
+      subtitle.innerText = 'Wie stark ist die heutige Erschöpfung?';
+      container.innerHTML = `
+        <div class="flex flex-col gap-2.5">
+          <button onclick="submitStatusUpdate('readiness', 'Leichte Erschöpfung / müde Beine', 5)" class="p-3 rounded-xl bg-slate-950/70 border border-amber-500/30 hover:border-amber-500 hover:bg-amber-950/20 text-left transition flex items-start gap-3 group">
+            <span class="text-lg">🥱</span>
+            <div>
+              <div class="text-sm font-semibold text-amber-300">Leichte Müdigkeit (5–6 / 10)</div>
+              <div class="text-xs text-slate-400 mt-0.5">Drosselt Tempo-Einheiten der nächsten 24h vorsorglich auf Zone Easy.</div>
+            </div>
+          </button>
+
+          <button onclick="submitStatusUpdate('readiness', 'Akute Erschöpfung / Schlafdefizit', 8)" class="p-3 rounded-xl bg-slate-950/70 border border-orange-500/30 hover:border-orange-500 hover:bg-orange-950/20 text-left transition flex items-start gap-3 group">
+            <span class="text-lg">🛌</span>
+            <div>
+              <div class="text-sm font-semibold text-orange-300">Akute Erschöpfung (7–9 / 10)</div>
+              <div class="text-xs text-slate-400 mt-0.5">Drosselt Tempo- und Intervalleinheiten der nächsten 48h auf Zone Easy.</div>
+            </div>
+          </button>
+
+          <button type="button" onclick="statusSubView = 'main'; renderStatusModalContent();" class="mt-2 text-xs text-slate-400 hover:text-white flex items-center gap-1 self-start">
+            ← Zurück zur Auswahl
+          </button>
+        </div>
+      `;
+    }
+
+    function renderPainForm(container, title, subtitle, isAdjusting = false) {
+      title.innerHTML = isAdjusting ? '<span>📊</span> Schmerzlevel anpassen' : '<span>🩹</span> Beschwerden erfassen';
+      subtitle.innerText = 'Gib die betroffene Stelle und Schmerzintensität (1–10) an:';
+      container.innerHTML = `
+        <div class="flex flex-col gap-3.5">
+          <div>
+            <label class="block text-xs font-semibold text-slate-300 mb-1.5">Betroffene Region / Gelenk</label>
+            <select id="pain-location-select" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-teal-400">
+              <option value="Knie">Knie</option>
+              <option value="Achillessehne">Achillessehne</option>
+              <option value="Schienbein">Schienbein (Shin Splints)</option>
+              <option value="Fußsohle / Plantarfaszie">Fußsohle / Plantarfaszie</option>
+              <option value="Wade / Oberschenkel">Wade / Oberschenkel</option>
+              <option value="Hüfte / IT-Band">Hüfte / IT-Band</option>
+              <option value="Rücken / LWS">Rücken / LWS</option>
+              <option value="Schulter / Nacken">Schulter / Nacken</option>
+              <option value="Sonstige Beschwerden">Sonstige Beschwerden</option>
+            </select>
+          </div>
+
+          <div>
+            <div class="flex justify-between items-center mb-1.5">
+              <label class="text-xs font-semibold text-slate-300">Schmerzintensität (1–10)</label>
+              <span id="pain-severity-val" class="font-mono text-xs font-bold text-amber-400">4 / 10 (Strukturell)</span>
+            </div>
+            <input type="range" id="pain-severity-slider" min="1" max="10" value="4" step="1" oninput="updatePainSeverityLabel(this.value)" class="w-full accent-teal-400">
+            <div class="flex justify-between text-[10px] text-slate-500 mt-1">
+              <span>1–3: Zwicken (Niggle)</span>
+              <span>4–6: Spürbar / Pause</span>
+              <span>7–10: Akut</span>
+            </div>
+          </div>
+
+          <div id="pain-impact-hint" class="p-2.5 rounded-xl bg-slate-950/70 border border-slate-800 text-[11px] text-slate-300">
+            ℹ️ <strong>Auswirkung:</strong> 72h Pause der Einheiten & anschließende Schonung.
+          </div>
+
+          <div class="flex items-center justify-between pt-1">
+            <button type="button" onclick="statusSubView = 'main'; renderStatusModalContent();" class="text-xs text-slate-400 hover:text-white">
+              ← Zurück
+            </button>
+            <button type="button" onclick="submitPainForm()" class="px-4 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-semibold text-xs transition shadow-lg">
+              Schonung anwenden
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    function updatePainSeverityLabel(val) {
+      val = parseInt(val, 10);
+      const lbl = document.getElementById('pain-severity-val');
+      const hint = document.getElementById('pain-impact-hint');
+      if (!lbl) return;
+
+      if (val <= 3) {
+        lbl.className = 'font-mono text-xs font-bold text-yellow-400';
+        lbl.innerText = `${val} / 10 (Zwicken / Niggle)`;
+        if (hint) hint.innerHTML = 'ℹ️ <strong>Auswirkung:</strong> Nächste 48h nur lockere Grundlagenläufe (Zone Easy), keine harten Intervalle.';
+      } else if (val <= 6) {
+        lbl.className = 'font-mono text-xs font-bold text-orange-400';
+        lbl.innerText = `${val} / 10 (Strukturell)`;
+        if (hint) hint.innerHTML = 'ℹ️ <strong>Auswirkung:</strong> 72h Pause (Ruhetage) und anschließende Tempo-Schonung.';
+      } else {
+        lbl.className = 'font-mono text-xs font-bold text-rose-400';
+        lbl.innerText = `${val} / 10 (Akut)`;
+        if (hint) hint.innerHTML = '⚠️ <strong>Auswirkung:</strong> Sofortige 72h Zwangspause zur Vermeidung von Folgeschäden.';
+      }
+    }
+
+    function submitPainForm() {
+      const loc = document.getElementById('pain-location-select')?.value || 'Gelenk';
+      const sev = parseInt(document.getElementById('pain-severity-slider')?.value || '4', 10);
+      const note = `Schmerzmeldung: ${loc} (${sev}/10)`;
+      submitStatusUpdate('pain_report', note, sev, loc);
+    }
+
+    async function submitStatusUpdate(type, note, severity = null, location = null) {
       closeStatusModal();
       const chat = document.getElementById('chat-messages');
       chat.innerHTML += `<div class="bg-amber-600 text-white rounded-2xl rounded-tr-sm p-2.5 max-w-[85%] self-end text-xs font-semibold">🩺 Status-Update: ${note}</div>`;
@@ -1975,6 +2807,7 @@ def index():
             update_type: type,
             note: note,
             severity: severity,
+            location: location,
             plan_id: currentPlanId
           })
         });

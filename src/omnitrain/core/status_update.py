@@ -9,8 +9,11 @@ from omnitrain.core.reconcile import MutationRule, PlanMutation, demote_high_int
 
 class UpdateType(str, Enum):
     RECOVERY = "recovery"
+    SICKNESS = "sickness"
     PAIN_UPDATE = "pain_update"
+    PAIN_REPORT = "pain_report"
     READINESS_UPDATE = "readiness_update"
+    FIT = "fit"
     GOAL_CHANGE = "goal_change"
 
 
@@ -56,10 +59,17 @@ class StatusUpdateHandler:
          - First training at max 50% planned volume
          - No tempo/intervals for 4 days post-recovery
          - Restore regular plan from day 5
-      2. Pain Update (resolved):
+      2. Sickness reported:
+         - Converts all upcoming workouts to rest until recovery reported
+      3. Pain Report:
+         - Severity >= 4: 72h pause + demote high intensity
+         - Severity 1-3: 48h niggle observation (easy only)
+      4. Pain Update (resolved):
          - Clears pain pause, restores planned workouts
-      3. Readiness / Fatigue:
-         - 48h drop in intensity (tempo -> easy)
+      5. Readiness / Fatigue:
+         - 24-48h drop in intensity (tempo -> easy)
+      6. Fit / Full energy:
+         - Reconfirms optimal status
     """
 
     @classmethod
@@ -103,12 +113,66 @@ class StatusUpdateHandler:
             ))
             return mutations
 
+        elif update.update_type == UpdateType.SICKNESS:
+            # SICK MODE AKTIVIEREN
+            affected_ids = []
+            for wo in upcoming_workouts:
+                if wo.date >= current_date:
+                    wo.workout_type = "rest"
+                    wo.metric_primary = 0.0
+                    wo.intensity_target = "rest"
+                    wo.intensity_detail = "Ruhetag wegen Krankheit"
+                    affected_ids.append(wo.id)
+
+            mutations.append(PlanMutation(
+                rule=MutationRule.SICK_PAUSE,
+                description="Krankheit gemeldet: Alle bevorstehenden Einheiten in Ruhetage umgewandelt bis Genesungsmeldung.",
+                affected_workout_ids=affected_ids
+            ))
+            return mutations
+
+        elif update.update_type == UpdateType.PAIN_REPORT:
+            severity = int(update.details.get("severity", 5))
+            location = update.details.get("location", "Beschwerden")
+            affected_ids = []
+
+            if severity >= 4:
+                cutoff_date = current_date + timedelta(days=3)
+                for wo in upcoming_workouts:
+                    if wo.date >= current_date:
+                        if wo.date <= cutoff_date:
+                            wo.workout_type = "rest"
+                            wo.metric_primary = 0.0
+                            wo.intensity_target = "rest"
+                            wo.intensity_detail = f"Schmerzpause ({location}, {severity}/10): Regeneration"
+                            affected_ids.append(wo.id)
+                        elif demote_high_intensity(wo, f"Schonung ({location})"):
+                            affected_ids.append(wo.id)
+
+                mutations.append(PlanMutation(
+                    rule=MutationRule.PAIN_REST_48H,
+                    description=f"Struktureller Schmerz ({location}, {severity}/10): 72h Pause und harte Intensitäten gestrichen.",
+                    affected_workout_ids=affected_ids
+                ))
+            else:
+                cutoff_date = current_date + timedelta(days=2)
+                for wo in upcoming_workouts:
+                    if current_date <= wo.date <= cutoff_date and demote_high_intensity(wo, f"Niggle-Beobachtung ({location}, {severity}/10)"):
+                        affected_ids.append(wo.id)
+
+                mutations.append(PlanMutation(
+                    rule=MutationRule.PAIN_NIGGLE_EASY_ONLY,
+                    description=f"Niggle registriert ({location}, {severity}/10): Harte Intensitäten in den nächsten 48h auf Grundlagentempo gedrosselt.",
+                    affected_workout_ids=affected_ids
+                ))
+            return mutations
+
         elif update.update_type == UpdateType.PAIN_UPDATE:
             status = update.details.get("status", "resolved")
             if status == "resolved":
                 affected_ids = []
                 for wo in upcoming_workouts:
-                    if wo.workout_type == "rest" and "Schmerz" in (wo.intensity_detail or ""):
+                    if wo.workout_type == "rest" and any(k in (wo.intensity_detail or "") for k in ["Schmerz", "Niggle", "Schonung"]):
                         restore_workout_to_easy(wo)
                         affected_ids.append(wo.id)
 
@@ -120,20 +184,26 @@ class StatusUpdateHandler:
                 return mutations
 
         elif update.update_type == UpdateType.READINESS_UPDATE:
-            # Regel 3: FATIGUE / LOW READINESS
             severity = update.details.get("severity", 5)
-            if severity >= 7:
-                cutoff_48h = current_date + timedelta(days=2)
-                affected_ids = []
-                for wo in upcoming_workouts:
-                    if wo.date <= cutoff_48h and demote_high_intensity(wo, f"Fatigue-Drosselung ({severity}/10)"):
-                        affected_ids.append(wo.id)
+            cutoff = current_date + timedelta(days=2 if severity >= 7 else 1)
+            affected_ids = []
+            for wo in upcoming_workouts:
+                if current_date <= wo.date <= cutoff and demote_high_intensity(wo, f"Fatigue-Drosselung ({severity}/10)"):
+                    affected_ids.append(wo.id)
 
-                mutations.append(PlanMutation(
-                    rule=MutationRule.FATIGUE_DROP_INTENSITY,
-                    description=f"Akute Erschöpfung ({severity}/10): Nächste 48h High-Intensity auf Grundlagentempo gedrosselt.",
-                    affected_workout_ids=affected_ids
-                ))
-                return mutations
+            mutations.append(PlanMutation(
+                rule=MutationRule.FATIGUE_DROP_INTENSITY,
+                description=f"Erschöpfung gemeldet ({severity}/10): High-Intensity Einheiten auf Grundlagentempo gedrosselt.",
+                affected_workout_ids=affected_ids
+            ))
+            return mutations
+
+        elif update.update_type == UpdateType.FIT:
+            mutations.append(PlanMutation(
+                rule=MutationRule.COMPLETED_AS_PLANNED,
+                description="Status 'Topfit' erfasst: Bereitschaft optimal, Plan wird uneingeschränkt fortgeführt.",
+                affected_workout_ids=[]
+            ))
+            return mutations
 
         return mutations

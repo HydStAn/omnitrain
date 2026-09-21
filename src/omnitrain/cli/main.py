@@ -583,12 +583,21 @@ def status_update(
     if update_type == "recovery":
         u_type = UpdateType.RECOVERY
         details = {"condition": "sickness", "status": "resolved"}
+    elif update_type == "sickness":
+        u_type = UpdateType.SICKNESS
+        details = {"condition": "sickness"}
     elif update_type in ["pain_resolved", "pain"]:
         u_type = UpdateType.PAIN_UPDATE
         details = {"status": "resolved"}
+    elif update_type == "pain_report":
+        u_type = UpdateType.PAIN_REPORT
+        details = {"severity": 5, "location": "Gelenk/Muskel"}
     elif update_type in ["readiness", "fatigue"]:
         u_type = UpdateType.READINESS_UPDATE
         details = {"severity": 8}
+    elif update_type == "fit":
+        u_type = UpdateType.FIT
+        details = {"readiness": 10}
 
     event = StatusUpdateEvent(update_type=u_type, details=details, notes=note)
 
