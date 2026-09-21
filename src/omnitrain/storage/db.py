@@ -40,5 +40,17 @@ class Database:
                     (1, now, m_001_initial.DESCRIPTION)
                 )
                 conn.commit()
-                return 1
+                current_v = 1
+
+            if current_v < 2:
+                from omnitrain.storage.migrations import m_002_plan_name
+                m_002_plan_name.apply_migration(conn)
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    "INSERT INTO schema_version (version, applied_at, description) VALUES (?, ?, ?)",
+                    (2, now, m_002_plan_name.DESCRIPTION)
+                )
+                conn.commit()
+                current_v = 2
+
             return current_v

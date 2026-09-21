@@ -264,7 +264,8 @@ def plan_new(
     goal: str = typer.Option("marathon", help="Ziel: marathon, half_marathon, 10k, 5k, ftp_builder"),
     vdot: float = typer.Option(45.0, help="Daniels VDOT Wert (nur für Running)"),
     weeks_count: int = typer.Option(16, help="Dauer des Plans in Wochen"),
-    baseline_volume: float = typer.Option(30.0, help="Aktuelles Basisvolumen pro Woche (z.B. km)")
+    baseline_volume: float = typer.Option(30.0, help="Aktuelles Basisvolumen pro Woche (z.B. km)"),
+    name: Optional[str] = typer.Option(None, help="Eindeutiger Name des Plans (z.B. 'Frühjahrs-Marathon Zürich')")
 ):
     """Erstellt einen neuen periodisierten Trainingsplan."""
     db = get_db()
@@ -273,6 +274,7 @@ def plan_new(
     target_date = start_date + timedelta(weeks=weeks_count)
     plan_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
+    plan_name = name.strip() if name and name.strip() else f"{goal.replace('_', ' ').title()} ({weeks_count}W)"
 
     console.print(f"[bold cyan]Generiere {weeks_count}-Wochen {goal.title()}-Plan ({sport})...[/bold cyan]")
 
@@ -368,13 +370,13 @@ def plan_new(
         conn.execute(
             """
             INSERT INTO plans (
-                id, user_id, sport_type, goal_type, start_date, target_date,
+                id, user_id, name, sport_type, goal_type, start_date, target_date,
                 available_days, base_weekly_volume, sessions_per_week, key_workout_day,
                 status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?);
             """,
             (
-                plan_id, user_id, sport, goal, start_date.isoformat(), target_date.isoformat(),
+                plan_id, user_id, plan_name, sport, goal, start_date.isoformat(), target_date.isoformat(),
                 json.dumps(effective_days), effective_base, effective_sessions, effective_days[-1], now, now
             )
         )

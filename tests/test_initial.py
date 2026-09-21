@@ -6,7 +6,7 @@ def test_database_migration(tmp_path):
     db_file = tmp_path / "test_omnitrain.db"
     db = Database(db_file)
     version = db.migrate()
-    assert version == 1
+    assert version >= 2
 
     with db.get_connection() as conn:
         tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()]
@@ -17,6 +17,9 @@ def test_database_migration(tmp_path):
         assert "workouts" in tables
         assert "checkin_logs" in tables
         assert "training_zones" in tables
+
+        plan_cols = [row[1] for row in conn.execute("PRAGMA table_info(plans);").fetchall()]
+        assert "name" in plan_cols
 
 def test_checkin_schema_validation():
     payload = {

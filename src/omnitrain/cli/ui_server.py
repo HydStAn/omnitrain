@@ -643,6 +643,7 @@ class PlanCreateRequest(BaseModel):
     vdot: float
     weeks_count: int
     baseline_volume: float
+    name: Optional[str] = None
 
 
 @app.post("/api/plan/create")
@@ -653,9 +654,31 @@ def create_plan(req: PlanCreateRequest):
         goal=req.goal,
         vdot=req.vdot,
         weeks_count=req.weeks_count,
-        baseline_volume=req.baseline_volume
+        baseline_volume=req.baseline_volume,
+        name=req.name
     )
     return {"status": "ok"}
+
+
+class PlanRenameRequest(BaseModel):
+    plan_id: str
+    name: str
+
+
+@app.post("/api/plan/rename")
+def rename_plan(req: PlanRenameRequest):
+    new_name = req.name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="Plan name must not be empty")
+    db = get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    with db.get_connection() as conn:
+        conn.execute(
+            "UPDATE plans SET name = ?, updated_at = ? WHERE id = ?;",
+            (new_name, now, req.plan_id)
+        )
+        conn.commit()
+    return {"status": "ok", "message": "Plan umbenannt", "name": new_name}
 
 
 class PlanActionRequest(BaseModel):
@@ -1156,6 +1179,10 @@ def index():
         </div>
 
         <div id="onboard-guided-box" class="hidden flex flex-col gap-3">
+          <div>
+            <label class="block text-[10px] uppercase text-slate-400 font-semibold mb-1">Individueller Planname (optional)</label>
+            <input id="guided-plan-name" type="text" placeholder="z.B. Frühjahrs-Marathon Zürich 2027" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 text-xs focus:border-teal-500 outline-none">
+          </div>
           <div class="grid grid-cols-2 gap-3 text-xs">
             <div>
               <label class="block text-[10px] uppercase text-slate-400 font-semibold mb-1">Sportart</label>
@@ -1203,10 +1230,14 @@ def index():
       <!-- Step 2: Summary / Confirmation Card -->
       <div id="onboard-step-summary" class="hidden flex flex-col gap-3">
         <div class="bg-slate-950/80 border border-teal-500/40 rounded-xl p-4 text-xs">
-          <div class="font-bold text-teal-300 text-sm mb-2 flex items-center gap-2">
+          <div class="font-bold text-teal-300 text-sm mb-3 flex items-center gap-2">
             <span>📋</span> Zusammenfassung deines Plans:
           </div>
-          <div class="grid grid-cols-2 gap-2 text-slate-300 font-mono mb-3">
+          <div class="mb-3">
+            <label class="block text-[10px] uppercase text-slate-400 font-semibold mb-1">Planname (frei anpassbar):</label>
+            <input id="sum-plan-name" type="text" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white font-semibold text-xs focus:border-teal-400 outline-none">
+          </div>
+          <div class="grid grid-cols-2 gap-2 text-slate-300 font-mono mb-3 bg-slate-900/50 p-2.5 rounded-lg border border-slate-800">
             <div>Sportart: <strong id="sum-sport" class="text-white">RUNNING</strong></div>
             <div>Event: <strong id="sum-goal" class="text-white">MARATHON</strong></div>
             <div>Dauer: <strong id="sum-weeks" class="text-white">16 Wochen</strong></div>
@@ -1858,6 +1889,27 @@ def index():
       }
     }
 
+    async function renamePlanAction(planId, currentName) {
+      const newName = prompt("Neuen Namen für diesen Trainingsplan eingeben:", currentName || "");
+      if (!newName || !newName.trim() || newName.trim() === currentName) return;
+      try {
+        const res = await fetch('/api/plan/rename', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({plan_id: planId, name: newName.trim()})
+        });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          await loadState(planId);
+        } else {
+          alert("Fehler beim Umbenennen: " + (data.detail || "Unbekannter Fehler"));
+        }
+      } catch (err) {
+        console.error(err);
+        alert("Fehler beim Umbenennen des Plans.");
+      }
+    }
+
     function render() {
       if (!appState || !appState.active_plan) {
         document.getElementById('plan-title').innerText = "Kein aktiver Plan vorhanden";
@@ -1868,7 +1920,8 @@ def index():
       }
       const plan = appState.active_plan;
       const isArchived = plan.status === 'archived';
-      document.getElementById('plan-title').innerText = `${plan.sport_type.toUpperCase()} · ${plan.goal_type.replace('_', ' ').toUpperCase()} (Ziel: ${plan.target_date})${isArchived ? ' [ARCHIVIERT]' : ''}`;
+      const displayName = plan.name || `${plan.goal_type.replace('_', ' ').toUpperCase()} (${plan.sport_type})`;
+      document.getElementById('plan-title').innerText = `${displayName} · Ziel: ${plan.target_date}${isArchived ? ' [ARCHIVIERT]' : ''}`;
 
       // Check-in input placeholder
       const checkinInput = document.getElementById('checkin-input');
@@ -1895,7 +1948,8 @@ def index():
           const opt = document.createElement('option');
           opt.value = p.id;
           const statusTag = p.status === 'archived' ? ' 📦 [Archiv]' : '';
-          opt.innerText = `${p.sport_type.toUpperCase()}: ${p.goal_type.replace('_', ' ').toUpperCase()}${statusTag}`;
+          const pName = p.name ? `${p.name} (${p.sport_type.toUpperCase()})` : `${p.sport_type.toUpperCase()}: ${p.goal_type.replace('_', ' ').toUpperCase()}`;
+          opt.innerText = `${pName}${statusTag}`;
           if (p.id === plan.id) opt.selected = true;
           selector.appendChild(opt);
         });
@@ -2461,7 +2515,7 @@ def index():
           else if (p.sport_type === 'triathlon' || p.sport_type === 'multisport') sportIcon = '🏊';
 
           const cardBorder = isSelected ? 'border-teal-500/60 ring-1 ring-teal-500/40 bg-teal-950/20' : 'border-slate-800 bg-slate-950/60';
-          const goalTitle = p.goal_type.replace('_', ' ').toUpperCase();
+          const displayName = p.name || `${goalTitle} (${p.sport_type})`;
 
           const item = document.createElement('div');
           item.className = `p-3.5 rounded-xl border ${cardBorder} flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs transition`;
@@ -2470,12 +2524,15 @@ def index():
               <span class="text-2xl shrink-0 p-1.5 rounded-lg bg-slate-900 border border-slate-800">${sportIcon}</span>
               <div class="min-w-0">
                 <div class="flex flex-wrap items-center gap-2">
-                  <span class="font-bold text-white text-sm truncate">${goalTitle} (${p.sport_type})</span>
+                  <span class="font-bold text-white text-sm truncate">${displayName}</span>
+                  <button onclick="renamePlanAction('${p.id}', '${(p.name || '').replace(/'/g, "\\'")}')" title="Namen dieses Plans bearbeiten" class="text-slate-400 hover:text-teal-400 p-0.5 transition">
+                    ✏️
+                  </button>
                   ${isSelected ? '<span class="px-2 py-0.5 rounded bg-teal-500/20 text-teal-300 font-bold text-[10px] shrink-0">AKTIV AUSGEWÄHLT</span>' : ''}
                   ${isArchived ? '<span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-semibold text-[10px] shrink-0">📦 ARCHIVIERT</span>' : ''}
                 </div>
                 <div class="text-[11px] text-slate-400 mt-0.5">
-                  Zieltag: <strong class="text-slate-300 font-mono">${p.target_date}</strong> · Basis ${formatSportVolume(p.base_weekly_volume, p.sport_type, true)}
+                  <span class="text-slate-300 font-semibold uppercase">${goalTitle} (${p.sport_type})</span> · Zieltag: <strong class="text-slate-300 font-mono">${p.target_date}</strong> · Basis ${formatSportVolume(p.base_weekly_volume, p.sport_type, true)}
                 </div>
               </div>
             </div>
@@ -2493,6 +2550,10 @@ def index():
                   </button>
                 ` : ''}
 
+                <button onclick="renamePlanAction('${p.id}', '${(p.name || '').replace(/'/g, "\\'")}')" title="Plan umbenennen" class="p-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition text-[11px] flex items-center gap-1">
+                  <span>✏️</span> <span class="hidden xs:inline">Umbenennen</span>
+                </button>
+
                 ${!isArchived ? `
                   <button onclick="archivePlanAction('${p.id}')" title="Plan archivieren (pausieren)" class="p-1.5 px-2 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 transition text-[11px] flex items-center gap-1">
                     <span>📦</span> <span class="hidden xs:inline">Archivieren</span>
@@ -2503,7 +2564,7 @@ def index():
                   </button>
                 `}
 
-                <button onclick="deletePlanAction('${p.id}', '${goalTitle}')" title="Plan endgültig löschen" class="p-1.5 px-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 transition text-[11px] flex items-center gap-1">
+                <button onclick="deletePlanAction('${p.id}', '${displayName.replace(/'/g, "\\'")}')" title="Plan endgültig löschen" class="p-1.5 px-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 transition text-[11px] flex items-center gap-1">
                   <span>🗑️</span> <span class="hidden xs:inline">Löschen</span>
                 </button>
               </div>
@@ -3107,24 +3168,33 @@ def index():
       if (p.sport_type === 'strength' && baseVol > 40) baseVol = 14.0;
       if (p.sport_type === 'triathlon' && baseVol < 100) baseVol = 350.0;
 
+      const defaultName = `${p.target_event.replace('_', ' ').toUpperCase()} (${p.target_weeks || 16}W)`;
       pendingPlanParams = {
         sport: p.sport_type,
         goal: p.target_event,
         vdot: refFit,
         weeks_count: p.target_weeks || 16,
-        baseline_volume: baseVol
+        baseline_volume: baseVol,
+        name: defaultName
       };
 
       showSummaryView();
     }
 
     function previewGuidedGoal() {
+      const gSport = document.getElementById('guided-sport').value;
+      const gGoal = document.getElementById('guided-goal').value;
+      const gWeeks = parseInt(document.getElementById('guided-weeks').value) || 16;
+      const customName = document.getElementById('guided-plan-name')?.value.trim();
+      const defaultName = customName || `${gGoal.replace('_', ' ').toUpperCase()} (${gWeeks}W)`;
+
       pendingPlanParams = {
-        sport: document.getElementById('guided-sport').value,
-        goal: document.getElementById('guided-goal').value,
+        sport: gSport,
+        goal: gGoal,
         vdot: parseFloat(document.getElementById('guided-vdot').value) || 45.0,
-        weeks_count: parseInt(document.getElementById('guided-weeks').value) || 16,
-        baseline_volume: parseFloat(document.getElementById('guided-volume').value) || 30.0
+        weeks_count: gWeeks,
+        baseline_volume: parseFloat(document.getElementById('guided-volume').value) || 30.0,
+        name: defaultName
       };
       showSummaryView();
     }
@@ -3141,6 +3211,9 @@ def index():
       else if (sport === 'strength') { volUnit = "Sätze/W"; fitLabel = "1RM (kg)"; }
       else if (sport === 'triathlon') { volUnit = "TSS/W"; fitLabel = "VDOT"; }
 
+      const sumNameInput = document.getElementById('sum-plan-name');
+      if (sumNameInput) sumNameInput.value = pendingPlanParams.name || '';
+
       document.getElementById('sum-sport').innerText = pendingPlanParams.sport.toUpperCase();
       document.getElementById('sum-goal').innerText = pendingPlanParams.goal.replace('_', ' ').toUpperCase();
       document.getElementById('sum-weeks').innerText = `${pendingPlanParams.weeks_count} Wochen`;
@@ -3156,6 +3229,12 @@ def index():
 
     async function finalizePlanGeneration() {
       if (!pendingPlanParams) return;
+
+      const sumNameInput = document.getElementById('sum-plan-name');
+      if (sumNameInput && sumNameInput.value.trim()) {
+        pendingPlanParams.name = sumNameInput.value.trim();
+      }
+
       document.getElementById('onboard-step-summary').classList.add('hidden');
       document.getElementById('onboard-step-animation').classList.remove('hidden');
 
