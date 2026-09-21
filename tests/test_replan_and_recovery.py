@@ -219,3 +219,71 @@ def test_status_update_pain_reporting():
     assert upcoming2[0].workout_type == "easy"  # demoted
     assert upcoming2[1].workout_type == "tempo"  # beyond 48h preserved
 
+
+def test_update_plan_parameters_endpoint(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from omnitrain.cli import ui_server
+    from omnitrain.storage.db import Database
+    from omnitrain.cli.main import plan_new
+
+    # Setup temporary database
+    db_file = tmp_path / "test_omnitrain.db"
+    db = Database(db_file)
+    db.migrate()
+
+    monkeypatch.setattr(ui_server, "get_db", lambda: db)
+    monkeypatch.setattr("omnitrain.cli.main.get_db", lambda: db)
+
+    # 1. Create a plan
+    plan_new(
+        sport="running",
+        goal="marathon",
+        vdot=45.0,
+        weeks_count=12,
+        baseline_volume=35.0,
+        name="Herbstmarathon Original"
+    )
+
+    with db.get_connection() as conn:
+        plan = conn.execute("SELECT * FROM plans LIMIT 1;").fetchone()
+        plan_id = plan["id"]
+        original_target = plan["target_date"]
+        original_vol = plan["base_weekly_volume"]
+        workout_count_before = conn.execute("SELECT COUNT(*) as c FROM workouts;").fetchone()["c"]
+
+    client = TestClient(ui_server.app)
+
+    # 2. Update parameters: extend target date, update baseline, change vdot and name
+    new_target = (date.today() + timedelta(weeks=16)).isoformat()
+    res = client.post("/api/plan/update-parameters", json={
+        "plan_id": plan_id,
+        "name": "Frühjahrsmarathon Angepasst",
+        "target_date": new_target,
+        "base_weekly_volume": 42.0,
+        "reference_value": 48.0
+    })
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "ok"
+    assert data["name"] == "Frühjahrsmarathon Angepasst"
+    assert data["target_date"] == new_target
+    assert data["base_weekly_volume"] == 42.0
+    assert data["reference_value"] == 48.0
+
+    # 3. Verify in DB
+    with db.get_connection() as conn:
+        updated_plan = conn.execute("SELECT * FROM plans WHERE id = ?;", (plan_id,)).fetchone()
+        assert updated_plan["name"] == "Frühjahrsmarathon Angepasst"
+        assert updated_plan["target_date"] == new_target
+        assert updated_plan["base_weekly_volume"] == 42.0
+
+        # Check training zone updated to 48.0
+        zone = conn.execute("SELECT * FROM training_zones WHERE user_id = ? ORDER BY calculated_at DESC LIMIT 1;", (updated_plan["user_id"],)).fetchone()
+        assert zone["reference_value"] == 48.0
+
+        # Check that workouts exist and were regenerated for 16 weeks
+        weeks = conn.execute("SELECT * FROM weeks WHERE plan_id = ? ORDER BY week_number ASC;", (plan_id,)).fetchall()
+        assert len(weeks) == 16
+
+

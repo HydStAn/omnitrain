@@ -681,6 +681,340 @@ def rename_plan(req: PlanRenameRequest):
     return {"status": "ok", "message": "Plan umbenannt", "name": new_name}
 
 
+class PlanUpdateParametersRequest(BaseModel):
+    plan_id: str
+    name: Optional[str] = None
+    target_date: Optional[str] = None
+    weeks_count: Optional[int] = None
+    base_weekly_volume: Optional[float] = None
+    reference_value: Optional[float] = None
+
+
+@app.post("/api/plan/update-parameters")
+def update_plan_parameters(req: PlanUpdateParametersRequest):
+    from omnitrain.sports.cycling import CyclingStrategy
+    from omnitrain.sports.swimming import SwimStrategy
+    from omnitrain.sports.strength import StrengthStrategy
+    from omnitrain.sports.triathlon import TriathlonStrategy
+
+    db = get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    today = date.today()
+
+    with db.get_connection() as conn:
+        plan_row = conn.execute("SELECT * FROM plans WHERE id = ? LIMIT 1;", (req.plan_id,)).fetchone()
+        if not plan_row:
+            raise HTTPException(status_code=404, detail="Plan not found")
+
+        sport = plan_row["sport_type"]
+        goal = plan_row["goal_type"]
+        user_id = plan_row["user_id"]
+        start_date = date.fromisoformat(plan_row["start_date"])
+        current_target_date = date.fromisoformat(plan_row["target_date"])
+
+        # 1. Determine new target_date
+        new_target_date = current_target_date
+        if req.target_date:
+            try:
+                new_target_date = date.fromisoformat(req.target_date)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid target_date format. Use YYYY-MM-DD.")
+        elif req.weeks_count and req.weeks_count >= 4:
+            new_target_date = start_date + timedelta(weeks=req.weeks_count)
+
+        if new_target_date <= start_date:
+            raise HTTPException(status_code=400, detail="Zieldatum muss nach dem Startdatum liegen.")
+
+        # 2. Determine base_weekly_volume
+        new_base_vol = float(req.base_weekly_volume) if req.base_weekly_volume is not None and req.base_weekly_volume > 0 else float(plan_row["base_weekly_volume"])
+
+        # 3. Determine new name
+        new_name = req.name.strip() if req.name and req.name.strip() else plan_row["name"]
+
+        # 4. Determine available days & sessions
+        available_days = json.loads(plan_row["available_days"] or "[]")
+        if not available_days:
+            if sport in ["swimming", "strength"]:
+                available_days = [1, 3, 5]
+            elif sport in ["triathlon", "multisport"]:
+                available_days = [1, 2, 3, 4, 5, 6, 7]
+            else:
+                available_days = [2, 4, 6, 7]
+        sessions_per_week = plan_row["sessions_per_week"] or len(available_days)
+
+        # 5. Fetch existing reference value
+        zone_row = conn.execute(
+            "SELECT * FROM training_zones WHERE user_id = ? AND sport_type = ? ORDER BY calculated_at DESC LIMIT 1;",
+            (user_id, sport)
+        ).fetchone()
+        existing_ref = float(zone_row["reference_value"]) if zone_row and zone_row["reference_value"] else 45.0
+        ref_val = float(req.reference_value) if req.reference_value is not None and req.reference_value > 0 else existing_ref
+
+        # 6. Update plans table
+        conn.execute(
+            """
+            UPDATE plans
+            SET name = ?, target_date = ?, base_weekly_volume = ?, updated_at = ?
+            WHERE id = ?;
+            """,
+            (new_name, new_target_date.isoformat(), new_base_vol, now, req.plan_id)
+        )
+
+        # 7. Update training_zones if reference_value provided or sport-specific zones
+        if sport == "cycling":
+            strat = CyclingStrategy()
+            zones = strat.calculate_zones(ref_val)
+            zone_model = "coggan_ftp"
+        elif sport == "swimming":
+            strat = SwimStrategy()
+            zones = strat.calculate_zones(ref_val)
+            zone_model = "swim_css"
+        elif sport == "strength":
+            strat = StrengthStrategy()
+            zones = strat.calculate_zones(ref_val)
+            zone_model = "strength_dup"
+        elif sport in ["triathlon", "multisport"]:
+            zones = get_daniels_zones(ref_val)
+            zone_model = "triathlon_hybrid"
+        else:
+            zones = get_daniels_zones(ref_val)
+            zone_model = "daniels_vdot"
+
+        new_zone_id = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT INTO training_zones (
+                id, user_id, sport_type, zone_model, reference_value,
+                zones_json, calculated_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            (new_zone_id, user_id, sport, zone_model, ref_val, json.dumps(zones), now, now, now)
+        )
+
+        # 8. Check if there are past/completed workouts
+        completed_count = conn.execute(
+            """
+            SELECT COUNT(*) as cnt FROM workouts w
+            JOIN weeks wk ON w.week_id = wk.id
+            WHERE wk.plan_id = ? AND (w.status = 'completed' OR w.date < ?);
+            """,
+            (req.plan_id, today.isoformat())
+        ).fetchone()["cnt"]
+
+        if completed_count == 0:
+            # Full regeneration from original start_date
+            conn.execute("PRAGMA foreign_keys = ON;")
+            conn.execute("DELETE FROM workouts WHERE week_id IN (SELECT id FROM weeks WHERE plan_id = ?);", (req.plan_id,))
+            conn.execute("DELETE FROM weeks WHERE plan_id = ?;", (req.plan_id,))
+
+            if sport == "swimming":
+                strat = SwimStrategy()
+                weeks = strat.generate_plan(
+                    plan_id=req.plan_id,
+                    start_date=start_date,
+                    target_date=new_target_date,
+                    base_weekly_volume=new_base_vol,
+                    available_days=available_days,
+                    reference_value=ref_val,
+                    sessions_per_week=sessions_per_week
+                )
+            elif sport == "strength":
+                strat = StrengthStrategy()
+                weeks = strat.generate_plan(
+                    plan_id=req.plan_id,
+                    start_date=start_date,
+                    target_date=new_target_date,
+                    base_weekly_volume=new_base_vol,
+                    available_days=available_days,
+                    reference_value=ref_val,
+                    sessions_per_week=sessions_per_week
+                )
+            elif sport == "cycling":
+                strat = CyclingStrategy()
+                weeks = strat.generate_plan(
+                    plan_id=req.plan_id,
+                    start_date=start_date,
+                    target_date=new_target_date,
+                    base_weekly_volume=new_base_vol,
+                    available_days=available_days,
+                    reference_value=ref_val,
+                    sessions_per_week=sessions_per_week
+                )
+            elif sport in ["triathlon", "multisport"]:
+                weeks = TriathlonStrategy.generate_plan(
+                    plan_id=req.plan_id,
+                    start_date=start_date,
+                    target_date=new_target_date,
+                    base_weekly_volume=new_base_vol,
+                    available_days=available_days,
+                    limiter="swim",
+                    target_event=goal if "triathlon" in goal else "triathlon_olympic"
+                )
+            else:
+                weeks = RunningStrategy.generate_plan(
+                    plan_id=req.plan_id,
+                    start_date=start_date,
+                    target_date=new_target_date,
+                    base_weekly_volume=new_base_vol,
+                    available_days=available_days,
+                    vdot=ref_val,
+                    sessions_per_week=sessions_per_week
+                )
+
+            for w in weeks:
+                conn.execute(
+                    """
+                    INSERT INTO weeks (
+                        id, plan_id, week_number, week_start_date, phase,
+                        target_weekly_volume, target_weekly_tss, is_recovery_week,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (w.id, req.plan_id, w.week_number, w.week_start_date.isoformat(), w.phase.value,
+                     w.target_weekly_volume, w.target_weekly_tss, 1 if w.is_recovery_week else 0, now, now)
+                )
+                for wo in w.workouts:
+                    conn.execute(
+                        """
+                        INSERT INTO workouts (
+                            id, week_id, sport_type, date, day_of_week, workout_type,
+                            metric_primary, metric_unit, intensity_target, intensity_detail,
+                            target_duration_min, status, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        (wo.id, w.id, wo.sport_type.value, wo.date.isoformat(), wo.day_of_week,
+                         wo.workout_type, wo.metric_primary, wo.metric_unit, wo.intensity_target,
+                         wo.intensity_detail, wo.target_duration_min, wo.status.value, now, now)
+                    )
+        else:
+            # Has past checkins or completed workouts: preserve past, regenerate future from next Monday
+            # Delete upcoming planned workouts and weeks that have no completed workouts
+            conn.execute(
+                """
+                DELETE FROM workouts
+                WHERE date >= ? AND status = 'planned'
+                AND week_id IN (SELECT id FROM weeks WHERE plan_id = ?);
+                """,
+                (today.isoformat(), req.plan_id)
+            )
+
+            # Delete any weeks that no longer contain any workouts
+            conn.execute(
+                """
+                DELETE FROM weeks
+                WHERE plan_id = ?
+                AND id NOT IN (SELECT DISTINCT week_id FROM workouts WHERE week_id IS NOT NULL);
+                """,
+                (req.plan_id,)
+            )
+
+            # Find max existing week number
+            max_wk_row = conn.execute(
+                "SELECT MAX(week_number) as max_w FROM weeks WHERE plan_id = ?;",
+                (req.plan_id,)
+            ).fetchone()
+            start_week_num = (max_wk_row["max_w"] or 0) + 1
+
+            # Next Monday
+            days_ahead = (7 - today.weekday()) % 7
+            next_monday = today + timedelta(days=days_ahead if days_ahead > 0 else 7)
+
+            if next_monday < new_target_date:
+                # Generate future weeks
+                if sport == "cycling":
+                    strat = CyclingStrategy()
+                    future_weeks = strat.generate_plan(
+                        plan_id=req.plan_id,
+                        start_date=next_monday,
+                        target_date=new_target_date,
+                        base_weekly_volume=new_base_vol,
+                        available_days=available_days,
+                        reference_value=ref_val,
+                        sessions_per_week=sessions_per_week
+                    )
+                elif sport == "swimming":
+                    strat = SwimStrategy()
+                    future_weeks = strat.generate_plan(
+                        plan_id=req.plan_id,
+                        start_date=next_monday,
+                        target_date=new_target_date,
+                        base_weekly_volume=new_base_vol,
+                        available_days=available_days,
+                        reference_value=ref_val,
+                        sessions_per_week=sessions_per_week
+                    )
+                elif sport == "strength":
+                    strat = StrengthStrategy()
+                    future_weeks = strat.generate_plan(
+                        plan_id=req.plan_id,
+                        start_date=next_monday,
+                        target_date=new_target_date,
+                        base_weekly_volume=new_base_vol,
+                        available_days=available_days,
+                        reference_value=ref_val,
+                        sessions_per_week=sessions_per_week
+                    )
+                elif sport in ["triathlon", "multisport"]:
+                    future_weeks = TriathlonStrategy.generate_plan(
+                        plan_id=req.plan_id,
+                        start_date=next_monday,
+                        target_date=new_target_date,
+                        base_weekly_volume=new_base_vol,
+                        available_days=available_days,
+                        limiter="swim",
+                        target_event=goal if "triathlon" in goal else "triathlon_olympic"
+                    )
+                else:
+                    future_weeks = RunningStrategy.generate_plan(
+                        plan_id=req.plan_id,
+                        start_date=next_monday,
+                        target_date=new_target_date,
+                        base_weekly_volume=new_base_vol,
+                        available_days=available_days,
+                        vdot=ref_val,
+                        sessions_per_week=sessions_per_week
+                    )
+
+                for idx, w in enumerate(future_weeks):
+                    w_num = start_week_num + idx
+                    conn.execute(
+                        """
+                        INSERT INTO weeks (
+                            id, plan_id, week_number, week_start_date, phase,
+                            target_weekly_volume, target_weekly_tss, is_recovery_week,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        (w.id, req.plan_id, w_num, w.week_start_date.isoformat(), w.phase.value,
+                         w.target_weekly_volume, w.target_weekly_tss, 1 if w.is_recovery_week else 0, now, now)
+                    )
+                    for wo in w.workouts:
+                        conn.execute(
+                            """
+                            INSERT INTO workouts (
+                                id, week_id, sport_type, date, day_of_week, workout_type,
+                                metric_primary, metric_unit, intensity_target, intensity_detail,
+                                target_duration_min, status, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                            """,
+                            (wo.id, w.id, wo.sport_type.value, wo.date.isoformat(), wo.day_of_week,
+                             wo.workout_type, wo.metric_primary, wo.metric_unit, wo.intensity_target,
+                             wo.intensity_detail, wo.target_duration_min, wo.status.value, now, now)
+                        )
+
+        conn.commit()
+
+    return {
+        "status": "ok",
+        "message": "Plan-Eckdaten erfolgreich aktualisiert",
+        "plan_id": req.plan_id,
+        "name": new_name,
+        "target_date": new_target_date.isoformat(),
+        "base_weekly_volume": new_base_vol,
+        "reference_value": ref_val
+    }
+
+
 class PlanActionRequest(BaseModel):
     plan_id: str
 
@@ -783,7 +1117,12 @@ def index():
           <h1 class="font-bold text-lg tracking-tight truncate">OmniTrain</h1>
           <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-mono shrink-0">v0.1 Blueprint</span>
         </div>
-        <p id="plan-title" class="text-xs text-slate-400 mt-0.5 truncate">Lade Trainingsplan...</p>
+        <div class="flex items-center gap-1.5 mt-0.5 min-w-0">
+          <p id="plan-title" class="text-xs text-slate-400 truncate">Lade Trainingsplan...</p>
+          <button id="header-plan-edit-btn" onclick="openCurrentPlanEditModal()" title="Eckdaten dieses Plans bearbeiten (Zieldatum, Basis, VDOT...)" class="text-slate-400 hover:text-teal-400 p-0.5 text-xs transition shrink-0 hidden">
+            ⚙️
+          </button>
+        </div>
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <select id="plan-selector" onchange="onPlanSelect(this.value)" class="text-xs bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-teal-500 font-medium max-w-[140px] sm:max-w-[200px] truncate shrink-0">
@@ -1264,6 +1603,90 @@ def index():
           <div id="anim-stage" class="text-xs text-slate-400 mt-1">Generiere Daniels VDOT Zonen & Mesozyklus-Wochen...</div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Screen: Plan-Eckdaten bearbeiten Modal -->
+  <div id="plan-edit-modal" class="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 hidden" onclick="onPlanEditBackdropClick(event)">
+    <div class="glass-card bg-slate-900 border border-slate-700 w-full max-w-lg rounded-2xl p-4 sm:p-6 shadow-2xl relative max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
+      <div class="flex justify-between items-center mb-2 pb-2 border-b border-slate-800">
+        <h3 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+          <span>⚙️</span> Plan-Eckdaten anpassen
+        </h3>
+        <button onclick="closePlanEditModal()" class="text-slate-400 hover:text-white text-base p-1 rounded-lg hover:bg-slate-800 transition">✕</button>
+      </div>
+      <p class="text-xs text-slate-400 mb-4">
+        Passe die Kernparameter dieses Plans nachträglich an. Zukünftige geplante Einheiten und Zonen werden automatisch neu berechnet. Bisherige absolvierte Einheiten bleiben erhalten.
+      </p>
+
+      <form onsubmit="submitPlanEdit(event)" class="flex flex-col gap-4 text-xs">
+        <input type="hidden" id="edit-plan-id" value="">
+        <input type="hidden" id="edit-plan-sport" value="running">
+
+        <!-- Plan Name -->
+        <div>
+          <label class="block text-[10px] uppercase text-slate-400 font-semibold mb-1">Name des Plans</label>
+          <input id="edit-plan-name" type="text" required class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-white font-semibold text-xs focus:border-teal-400 outline-none">
+        </div>
+
+        <!-- Sport & Goal (Read-only context badge) -->
+        <div class="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between text-slate-300">
+          <div class="flex items-center gap-2">
+            <span id="edit-sport-icon" class="text-lg">🏃</span>
+            <div>
+              <span id="edit-sport-goal-label" class="font-bold text-white uppercase text-[11px]">MARATHON (RUNNING)</span>
+              <div class="text-[10px] text-slate-500">Startdatum: <span id="edit-plan-start-date" class="font-mono">--</span></div>
+            </div>
+          </div>
+          <span class="px-2 py-0.5 rounded bg-teal-500/20 text-teal-300 text-[10px] font-mono font-semibold">Struktur adaptiv</span>
+        </div>
+
+        <!-- Target Date & Weeks Count Grid -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-[10px] uppercase text-slate-400 font-semibold mb-1">Zieldatum / Wettkampftag</label>
+            <input id="edit-plan-target-date" type="date" required onchange="onEditTargetDateChange(this.value)" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-slate-200 font-mono text-xs focus:border-teal-400 outline-none">
+          </div>
+          <div>
+            <label class="block text-[10px] uppercase text-slate-400 font-semibold mb-1">Dauer ab Start (Wochen)</label>
+            <input id="edit-plan-weeks-count" type="number" min="4" max="52" onchange="onEditWeeksChange(this.value)" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-slate-200 font-mono text-xs focus:border-teal-400 outline-none">
+          </div>
+        </div>
+
+        <!-- Baseline Volume & Reference Value Grid -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label id="edit-volume-label" class="flex items-center gap-1 text-[10px] uppercase text-slate-400 font-semibold mb-1">
+              <span>Basisvolumen (km/W)</span>
+              <button type="button" onclick="showTermHelp('units', event)" class="w-3.5 h-3.5 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white flex items-center justify-center text-[8px] font-bold" title="Erklärung zu Volumen & Einheiten">?</button>
+            </label>
+            <input id="edit-plan-base-volume" type="number" step="0.1" min="1" max="20000" required class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-slate-200 font-mono text-xs focus:border-teal-400 outline-none">
+          </div>
+          <div>
+            <label id="edit-ref-label" class="flex items-center gap-1 text-[10px] uppercase text-slate-400 font-semibold mb-1">
+              <span>Fitnesswert (VDOT)</span>
+              <button type="button" id="edit-ref-help-btn" onclick="showTermHelp('vdot', event)" class="w-3.5 h-3.5 rounded-full bg-slate-800 hover:bg-teal-500 text-slate-400 hover:text-white flex items-center justify-center text-[8px] font-bold" title="Erklärung zum Fitnesswert">?</button>
+            </label>
+            <input id="edit-plan-reference-value" type="number" step="0.5" min="1" max="1000" required class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-slate-200 font-mono text-xs focus:border-teal-400 outline-none">
+          </div>
+        </div>
+
+        <!-- Info Notice -->
+        <div class="p-2.5 rounded-xl bg-slate-950/70 border border-slate-800 text-[11px] text-slate-400 flex items-start gap-2">
+          <span class="text-teal-400 text-sm shrink-0">💡</span>
+          <span>Beim Speichern werden anstehende geplante Einheiten und Zonen nach den neuen Eckdaten regeneriert.</span>
+        </div>
+
+        <!-- Actions -->
+        <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+          <button type="button" onclick="closePlanEditModal()" class="px-3.5 py-2 rounded-xl text-slate-400 hover:text-white text-xs transition">
+            Abbrechen
+          </button>
+          <button type="submit" id="btn-save-plan-edit" class="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white font-semibold text-xs shadow-lg transition flex items-center gap-1.5">
+            <span>💾</span> Eckdaten speichern & Plan anpassen
+          </button>
+        </div>
+      </form>
     </div>
   </div>
 
@@ -1770,6 +2193,7 @@ def index():
         closeGlossaryModal();
         closeStatusModal();
         closeOnboardModal();
+        closePlanEditModal();
       }
     });
 
@@ -1910,6 +2334,152 @@ def index():
       }
     }
 
+    function openCurrentPlanEditModal() {
+      if (appState && appState.active_plan) {
+        openPlanEditModal(appState.active_plan.id);
+      }
+    }
+
+    function openPlanEditModal(planId) {
+      if (!appState || !appState.all_plans) return;
+      const plan = appState.all_plans.find(p => p.id === planId) || appState.active_plan;
+      if (!plan) return;
+
+      document.getElementById('edit-plan-id').value = plan.id;
+      document.getElementById('edit-plan-sport').value = plan.sport_type;
+      document.getElementById('edit-plan-name').value = plan.name || '';
+      document.getElementById('edit-plan-target-date').value = plan.target_date || '';
+      document.getElementById('edit-plan-start-date').innerText = plan.start_date || '--';
+      document.getElementById('edit-plan-base-volume').value = plan.base_weekly_volume || 30;
+
+      // Calculate weeks count
+      const startD = new Date(plan.start_date);
+      const targetD = new Date(plan.target_date);
+      const diffWeeks = Math.max(4, Math.round((targetD - startD) / (7 * 24 * 60 * 60 * 1000)));
+      document.getElementById('edit-plan-weeks-count').value = diffWeeks;
+
+      // Sport Icon & Goal label
+      let sportIcon = '🏃';
+      if (plan.sport_type === 'cycling') sportIcon = '🚴';
+      else if (plan.sport_type === 'swimming') sportIcon = '🏊';
+      else if (plan.sport_type === 'strength') sportIcon = '🏋️';
+      else if (plan.sport_type === 'triathlon' || plan.sport_type === 'multisport') sportIcon = '🏊';
+      document.getElementById('edit-sport-icon').innerText = sportIcon;
+      document.getElementById('edit-sport-goal-label').innerText = `${(plan.goal_type || '').replace('_', ' ').toUpperCase()} (${plan.sport_type.toUpperCase()})`;
+
+      // Dynamic units & fitness labels
+      const volLabel = document.getElementById('edit-volume-label');
+      const refLabel = document.getElementById('edit-ref-label');
+      const refInput = document.getElementById('edit-plan-reference-value');
+      const refHelpBtn = document.getElementById('edit-ref-help-btn');
+
+      const curRef = (appState.active_plan && appState.active_plan.id === plan.id && appState.ref_vdot) ? appState.ref_vdot : 45.0;
+
+      if (plan.sport_type === 'cycling') {
+        volLabel.querySelector('span').innerText = "Basisvolumen (TSS/W)";
+        refLabel.querySelector('span').innerText = "FTP (Watt)";
+        refInput.value = curRef > 100 ? curRef : 220;
+        refHelpBtn.setAttribute('onclick', "showTermHelp('ftp', event)");
+      } else if (plan.sport_type === 'swimming') {
+        volLabel.querySelector('span').innerText = "Basisvolumen (Meter/W)";
+        refLabel.querySelector('span').innerText = "CSS (s/100m)";
+        refInput.value = curRef > 50 ? curRef : 105;
+        refHelpBtn.setAttribute('onclick', "showTermHelp('css', event)");
+      } else if (plan.sport_type === 'strength') {
+        volLabel.querySelector('span').innerText = "Basisvolumen (Sätze/W)";
+        refLabel.querySelector('span').innerText = "1RM Benchmark (kg)";
+        refInput.value = curRef || 100;
+        refHelpBtn.setAttribute('onclick', "showTermHelp('dup', event)");
+      } else if (plan.sport_type === 'triathlon' || plan.sport_type === 'multisport') {
+        volLabel.querySelector('span').innerText = "Basisvolumen (TSS/W)";
+        refLabel.querySelector('span').innerText = "Lauf VDOT";
+        refInput.value = curRef || 46;
+        refHelpBtn.setAttribute('onclick', "showTermHelp('vdot', event)");
+      } else {
+        volLabel.querySelector('span').innerText = "Basisvolumen (km/W)";
+        refLabel.querySelector('span').innerText = "Fitnesswert (VDOT)";
+        refInput.value = curRef || 45.0;
+        refHelpBtn.setAttribute('onclick', "showTermHelp('vdot', event)");
+      }
+
+      document.getElementById('plan-edit-modal').classList.remove('hidden');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closePlanEditModal() {
+      document.getElementById('plan-edit-modal').classList.add('hidden');
+      document.body.style.overflow = '';
+    }
+
+    function onPlanEditBackdropClick(e) {
+      if (e.target.id === 'plan-edit-modal') {
+        closePlanEditModal();
+      }
+    }
+
+    function onEditTargetDateChange(newDateStr) {
+      if (!newDateStr) return;
+      const startStr = document.getElementById('edit-plan-start-date').innerText;
+      if (!startStr || startStr === '--') return;
+      const startD = new Date(startStr);
+      const targetD = new Date(newDateStr);
+      const weeks = Math.max(4, Math.round((targetD - startD) / (7 * 24 * 60 * 60 * 1000)));
+      document.getElementById('edit-plan-weeks-count').value = weeks;
+    }
+
+    function onEditWeeksChange(newWeeks) {
+      const weeks = parseInt(newWeeks, 10);
+      if (!weeks || weeks < 4) return;
+      const startStr = document.getElementById('edit-plan-start-date').innerText;
+      if (!startStr || startStr === '--') return;
+      const startD = new Date(startStr);
+      startD.setDate(startD.getDate() + (weeks * 7));
+      document.getElementById('edit-plan-target-date').value = startD.toISOString().slice(0, 10);
+    }
+
+    async function submitPlanEdit(e) {
+      e.preventDefault();
+      const planId = document.getElementById('edit-plan-id').value;
+      const name = document.getElementById('edit-plan-name').value.trim();
+      const targetDate = document.getElementById('edit-plan-target-date').value;
+      const weeksCount = parseInt(document.getElementById('edit-plan-weeks-count').value, 10);
+      const baseVol = parseFloat(document.getElementById('edit-plan-base-volume').value);
+      const refVal = parseFloat(document.getElementById('edit-plan-reference-value').value);
+
+      const btn = document.getElementById('btn-save-plan-edit');
+      const originalText = btn.innerHTML;
+      btn.innerHTML = '<span>⏳</span> Aktualisiere Plan...';
+      btn.disabled = true;
+
+      try {
+        const res = await fetch('/api/plan/update-parameters', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            plan_id: planId,
+            name: name,
+            target_date: targetDate,
+            weeks_count: weeksCount,
+            base_weekly_volume: baseVol,
+            reference_value: refVal
+          })
+        });
+        const data = await res.json();
+        if (res.ok && data.status === 'ok') {
+          closePlanEditModal();
+          await loadState(planId);
+        } else {
+          alert("Fehler beim Aktualisieren: " + (data.detail || "Unbekannter Fehler"));
+        }
+      } catch (err) {
+        console.error(err);
+        alert("Fehler beim Aktualisieren der Plan-Eckdaten.");
+      } finally {
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+      }
+    }
+
     function render() {
       if (!appState || !appState.active_plan) {
         document.getElementById('plan-title').innerText = "Kein aktiver Plan vorhanden";
@@ -1922,6 +2492,10 @@ def index():
       const isArchived = plan.status === 'archived';
       const displayName = plan.name || `${plan.goal_type.replace('_', ' ').toUpperCase()} (${plan.sport_type})`;
       document.getElementById('plan-title').innerText = `${displayName} · Ziel: ${plan.target_date}${isArchived ? ' [ARCHIVIERT]' : ''}`;
+      const headerEditBtn = document.getElementById('header-plan-edit-btn');
+      if (headerEditBtn) {
+        headerEditBtn.classList.remove('hidden');
+      }
 
       // Check-in input placeholder
       const checkinInput = document.getElementById('checkin-input');
@@ -2550,6 +3124,10 @@ def index():
                     Wählen
                   </button>
                 ` : ''}
+
+                <button onclick="openPlanEditModal('${p.id}')" title="Plan-Eckdaten bearbeiten (Zieldatum, Basisvolumen, VDOT...)" class="p-1.5 px-2 rounded-lg bg-teal-500/10 hover:bg-teal-500/20 text-teal-300 border border-teal-500/30 transition text-[11px] flex items-center gap-1">
+                  <span>⚙️</span> <span class="hidden xs:inline">Eckdaten</span>
+                </button>
 
                 <button onclick="renamePlanAction('${p.id}', '${(p.name || '').replace(/'/g, "\\'")}')" title="Plan umbenennen" class="p-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition text-[11px] flex items-center gap-1">
                   <span>✏️</span> <span class="hidden xs:inline">Umbenennen</span>
