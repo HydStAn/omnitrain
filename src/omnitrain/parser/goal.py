@@ -32,10 +32,16 @@ class GoalParseResult(BaseModel):
     constraints: List[str] = Field(default_factory=list)
 
 
+import os
+
+DEFAULT_OLLAMA_URL = os.environ.get("OMNITRAIN_OLLAMA_URL", "http://127.0.0.1:11434")
+DEFAULT_OLLAMA_MODEL = os.environ.get("OMNITRAIN_MODEL", "qwen2.5:3b")
+
+
 class GoalParser:
     """Parses natural language onboarding goal into structured plan parameters."""
 
-    def __init__(self, ollama_url: str = "http://127.0.0.1:11434", model: str = "qwen2.5:3b"):
+    def __init__(self, ollama_url: str = DEFAULT_OLLAMA_URL, model: str = DEFAULT_OLLAMA_MODEL):
         self.ollama_url = ollama_url
         self.model = model
 

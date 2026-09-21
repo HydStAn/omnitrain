@@ -97,8 +97,21 @@ def get_state(plan_id: Optional[str] = None, show_archived: bool = False):
         ).fetchall()
         loads = []
         for c in checkins:
-            m = json.loads(c["actual_metrics_json"])
-            tss = m.get("tss", 0.0) or 40.0
+            m = json.loads(c["actual_metrics_json"] or "{}")
+            tss = m.get("tss", 0.0)
+            if not tss or tss <= 0:
+                dist = float(m.get("metric_primary", 0.0) or 0.0)
+                unit = m.get("unit", "km")
+                if unit == "km" and dist > 0:
+                    tss = round(dist * 6.5, 1)  # ~6.5 TSS per km of running
+                elif unit == "min" and dist > 0:
+                    tss = round(dist * 0.85, 1)  # ~50 TSS per hour of cycling
+                elif unit == "m" and dist > 0:
+                    tss = round((dist / 1000.0) * 20.0, 1)  # ~20 TSS per 1000m swim
+                elif unit == "sets" and dist > 0:
+                    tss = round(dist * 3.0, 1)  # ~3 TSS per work set
+                else:
+                    tss = 0.0
             loads.append(DailyLoad(date=c["timestamp"][:10], tss=tss))
         pmc_points = PMCEngine.calculate_pmc_series(loads)
         latest_pmc = pmc_points[-1].model_dump() if pmc_points else {"ctl": 0.0, "atl": 0.0, "tsb": 0.0}
@@ -130,6 +143,18 @@ def get_state(plan_id: Optional[str] = None, show_archived: bool = False):
                 pain_detail = w["intensity_detail"]
                 break
 
+        # 6. Recent Check-in Logs for Conversational History
+        recent_checkin_rows = conn.execute(
+            """
+            SELECT c.id, c.timestamp, c.raw_input, c.completion_status, c.perceived_rpe,
+                   c.actual_metrics_json, c.applied_mutations_json, w.workout_type, w.sport_type, w.date as workout_date
+            FROM checkin_logs c
+            LEFT JOIN workouts w ON c.workout_id = w.id
+            ORDER BY c.timestamp DESC LIMIT 20;
+            """
+        ).fetchall()
+        recent_checkins = [dict(r) for r in reversed(recent_checkin_rows)]
+
         return {
             "active_plan": dict(plan_row),
             "all_plans": [dict(p) for p in all_plans],
@@ -146,6 +171,7 @@ def get_state(plan_id: Optional[str] = None, show_archived: bool = False):
             "is_sick_mode": has_sick_workouts,
             "is_pain_mode": has_pain_workouts,
             "pain_detail": pain_detail,
+            "recent_checkins": recent_checkins,
         }
 
 
@@ -820,6 +846,11 @@ def index():
         </div>
         <div class="h-36 sm:h-40 w-full relative">
           <canvas id="pmcChart"></canvas>
+          <div id="pmc-empty-notice" class="hidden absolute inset-0 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-xs rounded-xl p-3 text-center z-10">
+            <span class="text-xl mb-1">📈</span>
+            <span class="text-xs font-semibold text-slate-300">Noch keine Belastungsdaten</span>
+            <span class="text-[10px] text-slate-500 mt-0.5 max-w-xs">Sobald Einheiten erfasst werden, visualisiert das PMC hier deine Fitness (CTL), Ermüdung (ATL) und Form (TSB).</span>
+          </div>
         </div>
       </section>
 
@@ -1918,7 +1949,10 @@ def index():
         document.getElementById('today-status').innerText = "";
       }
 
-      // Mini-Wochenansicht
+      // Chat-Historie aus DB
+      renderChatHistory();
+
+      // Mini-Wochenansicht (Dynamisch an aktuelle Kalenderwoche gekoppelt)
       renderWeekDots();
 
       // Screen 3: Wochenplan Carousel
@@ -1931,26 +1965,66 @@ def index():
       renderProfileAndZones();
     }
 
+    function renderChatHistory() {
+      const chat = document.getElementById('chat-messages');
+      if (!chat) return;
+
+      const defaultWelcome = `
+        <div class="bg-slate-800/80 rounded-2xl rounded-tl-sm p-3 max-w-[90%] sm:max-w-[88%] text-slate-300 break-words">
+          Wie war dein Training heute? Erzähl mir frei von Distanz, Gefühl (<span class="text-teal-300 cursor-pointer underline decoration-dotted" onclick="showTermHelp('rpe', event)" title="Rating of Perceived Exertion (1=sehr leicht, 10=maximal)">RPE 1-10 ℹ</span>) oder etwaigen Schmerzen / Symptomen.
+        </div>
+      `;
+
+      if (!appState.recent_checkins || appState.recent_checkins.length === 0) {
+        chat.innerHTML = defaultWelcome;
+        return;
+      }
+
+      let html = defaultWelcome;
+      appState.recent_checkins.forEach(c => {
+        const userText = c.raw_input || 'Check-in eingereicht';
+        const dateStr = c.timestamp ? c.timestamp.slice(0, 16).replace('T', ' ') : '';
+        html += `
+          <div class="bg-teal-700/80 text-white rounded-2xl rounded-tr-sm p-2.5 max-w-[85%] self-end text-xs break-words shadow">
+            <div class="font-medium">${userText}</div>
+            <div class="text-[9px] text-teal-200/70 text-right mt-1 font-mono">${dateStr}</div>
+          </div>
+        `;
+
+        const statusUpper = (c.completion_status || 'completed').toUpperCase();
+        const rpeInfo = c.perceived_rpe ? ` · RPE ${c.perceived_rpe}/10` : '';
+
+        html += `
+          <div class="bg-slate-800 rounded-2xl rounded-tl-sm p-3 max-w-[92%] text-slate-200 text-xs border border-slate-700">
+            <div>✅ Workout verarbeitet: <strong>${statusUpper}</strong>${rpeInfo}</div>
+          </div>
+        `;
+      });
+
+      chat.innerHTML = html;
+      chat.scrollTop = chat.scrollHeight;
+    }
+
     function renderPMCChart(series) {
       const ctx = document.getElementById('pmcChart');
+      const emptyNotice = document.getElementById('pmc-empty-notice');
       if (!ctx) return;
 
-      let labels = [];
-      let ctlData = [];
-      let atlData = [];
-      let tsbData = [];
-
-      if (series.length === 0) {
-        labels = ['Tag -6', 'Tag -5', 'Tag -4', 'Tag -3', 'Tag -2', 'Gestern', 'Heute'];
-        ctlData = [12, 13, 14, 14, 15, 16, 16.5];
-        atlData = [18, 22, 19, 25, 20, 24, 22.0];
-        tsbData = [-6, -9, -5, -11, -5, -8, -5.5];
-      } else {
-        labels = series.map(p => p.date.slice(5));
-        ctlData = series.map(p => p.ctl);
-        atlData = series.map(p => p.atl);
-        tsbData = series.map(p => p.tsb);
+      if (!series || series.length === 0) {
+        if (emptyNotice) emptyNotice.classList.remove('hidden');
+        if (pmcChartInstance) {
+          pmcChartInstance.destroy();
+          pmcChartInstance = null;
+        }
+        return;
       }
+
+      if (emptyNotice) emptyNotice.classList.add('hidden');
+
+      const labels = series.map(p => p.date.slice(5));
+      const ctlData = series.map(p => p.ctl);
+      const atlData = series.map(p => p.atl);
+      const tsbData = series.map(p => p.tsb);
 
       if (pmcChartInstance) {
         pmcChartInstance.destroy();
@@ -2009,13 +2083,45 @@ def index():
 
     function renderWeekDots() {
       const container = document.getElementById('week-dots');
+      if (!container) return;
       container.innerHTML = '';
       const days = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
-      const currentWeekWorkouts = appState.workouts.slice(0, 7);
+
+      const today = new Date();
+      const currentDay = today.getDay();
+      const distToMonday = (currentDay + 6) % 7;
+      const monday = new Date(today);
+      monday.setDate(today.getDate() - distToMonday);
+
+      const weekDates = [];
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(monday);
+        d.setDate(monday.getDate() + i);
+        weekDates.push(d.toISOString().slice(0, 10));
+      }
+
+      const todayStr = today.toISOString().slice(0, 10);
+
+      // Filter workouts of current calendar week
+      let currentWeekWorkouts = (appState.workouts || []).filter(w => weekDates.includes(w.date));
+
+      // Fallback if workouts are outside current week: pick active week in plan
+      if (currentWeekWorkouts.length === 0 && appState.weeks && appState.weeks.length > 0) {
+        const curWeekObj = appState.weeks[activeCarouselWeekIndex] || appState.weeks[0];
+        currentWeekWorkouts = (appState.workouts || []).filter(w => w.week_id === curWeekObj.id);
+      }
+
       days.forEach((dayName, idx) => {
-        const wo = currentWeekWorkouts.find(w => w.day_of_week === (idx + 1));
+        const dateStr = weekDates[idx];
+        const isToday = (todayStr === dateStr);
+
+        let wo = currentWeekWorkouts.find(w => w.date === dateStr);
+        if (!wo) {
+          wo = currentWeekWorkouts.find(w => w.day_of_week === (idx + 1));
+        }
+
         const col = document.createElement('div');
-        col.className = 'flex flex-col items-center gap-1 p-1.5 sm:p-2 rounded-xl bg-slate-900/60 border border-slate-800/60 min-w-0';
+        col.className = `flex flex-col items-center gap-1 p-1.5 sm:p-2 rounded-xl bg-slate-900/60 border ${isToday ? 'border-teal-500/60 ring-1 ring-teal-500/30 bg-teal-950/20' : 'border-slate-800/60'} min-w-0 transition`;
 
         let dotColor = 'bg-slate-700';
         let statusText = 'Rest';
@@ -2027,7 +2133,10 @@ def index():
         }
 
         col.innerHTML = `
-          <span class="text-[10px] sm:text-[11px] font-semibold text-slate-400">${dayName}</span>
+          <div class="flex items-center gap-0.5">
+            <span class="text-[10px] sm:text-[11px] font-semibold ${isToday ? 'text-teal-300 font-bold' : 'text-slate-400'}">${dayName}</span>
+            ${isToday ? '<span class="w-1 h-1 rounded-full bg-teal-400"></span>' : ''}
+          </div>
           <span class="w-3 h-3 sm:w-3.5 sm:h-3.5 rounded-full ${dotColor}"></span>
           <span class="text-[8px] sm:text-[9px] font-mono text-slate-500 truncate w-full text-center">${statusText}</span>
         `;
@@ -2650,7 +2759,7 @@ def index():
         return;
       }
 
-      title.innerHTML = '<span>🩺</span> Wie geht\'s dir heute?';
+      title.innerHTML = `<span>🩺</span> Wie geht's dir heute?`;
       subtitle.innerText = 'Wähle deinen aktuellen Status für eine bedarfsgerechte Anpassung des Trainingsplans:';
       body.innerHTML = `
         <div class="flex flex-col gap-2.5">

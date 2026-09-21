@@ -11,10 +11,16 @@ class LLMClientProtocol(Protocol):
         ...
 
 
-class OllamaLocalClient:
-    """Ollama API Client with 5s timeout and max 2 retries."""
+import os
 
-    def __init__(self, base_url: str = "http://127.0.0.1:11434", model: str = "qwen2.5:3b"):
+DEFAULT_OLLAMA_URL = os.environ.get("OMNITRAIN_OLLAMA_URL", "http://127.0.0.1:11434")
+DEFAULT_OLLAMA_MODEL = os.environ.get("OMNITRAIN_MODEL", "qwen2.5:3b")
+
+
+class OllamaLocalClient:
+    """Ollama API Client with configurable URL/model, 5s timeout and max 2 retries."""
+
+    def __init__(self, base_url: str = DEFAULT_OLLAMA_URL, model: str = DEFAULT_OLLAMA_MODEL):
         self.base_url = base_url
         self.model = model
 
